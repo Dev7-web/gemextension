@@ -1,0 +1,130 @@
+:root {
+  --popup-bg: #f7f9fc;
+  --popup-panel: #ffffff;
+  --popup-border: #d5dbe4;
+  --popup-text: #1f2937;
+  --popup-muted: #6b7280;
+  --popup-accent-dark: #1a365d;
+  --popup-accent-mid: #2c5282;
+  --popup-success: #10b981;
+  --popup-warning: #f59e0b;
+  --popup-danger: #ef4444;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  width: 300px;
+  font-family: "Trebuchet MS", "Lucida Sans Unicode", "Lucida Grande", sans-serif;
+  font-size: 14px;
+  color: var(--popup-text);
+  background: radial-gradient(circle at top, #ffffff 0%, #f1f5f9 55%, #e8eef7 100%);
+}
+
+.popup-container {
+  padding: 0;
+  border: 1px solid var(--popup-border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--popup-panel);
+}
+
+.popup-header {
+  background: linear-gradient(135deg, var(--popup-accent-dark) 0%, var(--popup-accent-mid) 100%);
+  color: #ffffff;
+  padding: 18px 20px;
+  text-align: center;
+}
+
+.popup-header h1 {
+  font-size: 18px;
+  margin-bottom: 6px;
+  letter-spacing: 0.3px;
+}
+
+.popup-header p {
+  font-size: 12px;
+  opacity: 0.9;
+}
+
+.popup-body {
+  padding: 15px;
+}
+
+.status-section {
+  margin-bottom: 15px;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  background: #f8fafc;
+  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--popup-warning);
+}
+
+.status-dot.active {
+  background: var(--popup-success);
+}
+
+.status-dot.inactive {
+  background: var(--popup-danger);
+}
+
+.info-section {
+  margin-bottom: 15px;
+}
+
+.info-section h3 {
+  font-size: 13px;
+  margin-bottom: 8px;
+  color: var(--popup-accent-dark);
+}
+
+.info-section ol {
+  padding-left: 20px;
+  font-size: 12px;
+  color: var(--popup-muted);
+  line-height: 1.6;
+}
+
+.settings-section h3 {
+  font-size: 13px;
+  margin-bottom: 10px;
+  color: var(--popup-accent-dark);
+}
+
+.setting-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.setting-item input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
+.popup-footer {
+  padding: 10px;
+  text-align: center;
+  background: #f8fafc;
+  font-size: 11px;
+  color: #94a3b8;
+}

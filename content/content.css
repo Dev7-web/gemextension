@@ -1,0 +1,194 @@
+/* ============================================
+   GEM BID FILTER - STYLES
+   ============================================ */
+
+/* Floating Control Panel */
+#gem-bid-filter-panel {
+  --gem-panel-bg: #ffffff;
+  --gem-panel-border: #d5dbe4;
+  --gem-panel-shadow: rgba(15, 23, 42, 0.18);
+  --gem-accent-dark: #1a365d;
+  --gem-accent-mid: #2c5282;
+  --gem-text: #1f2937;
+  --gem-muted: #6b7280;
+  --gem-soft: #eef2f7;
+  --gem-positive: #38a169;
+  --gem-info: #3182ce;
+  --gem-warning: #b7791f;
+  --gem-danger: #e53e3e;
+
+  position: fixed;
+  top: 100px;
+  right: 20px;
+  width: 280px;
+  background: var(--gem-panel-bg);
+  border: 1px solid var(--gem-panel-border);
+  border-radius: 10px;
+  box-shadow: 0 6px 22px var(--gem-panel-shadow);
+  z-index: 999999;
+  font-family: "Trebuchet MS", "Lucida Sans Unicode", "Lucida Grande", sans-serif;
+  font-size: 14px;
+  color: var(--gem-text);
+}
+
+/* Panel Header */
+#gem-bid-filter-panel .panel-header {
+  background: linear-gradient(135deg, var(--gem-accent-dark) 0%, var(--gem-accent-mid) 100%);
+  color: #ffffff;
+  padding: 12px 15px;
+  border-radius: 10px 10px 0 0;
+  cursor: move;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+#gem-bid-filter-panel .panel-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+#gem-bid-filter-panel .panel-toggle {
+  background: none;
+  border: none;
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 18px;
+  padding: 0 5px;
+}
+
+/* Panel Body */
+#gem-bid-filter-panel .panel-body {
+  padding: 15px;
+  background: linear-gradient(180deg, #f7f9fc 0%, #ffffff 100%);
+}
+
+/* Section Labels */
+#gem-bid-filter-panel .section-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--gem-muted);
+  margin-bottom: 8px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+}
+
+/* Button Grid */
+#gem-bid-filter-panel .button-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 15px;
+}
+
+/* Buttons */
+#gem-bid-filter-panel .filter-btn {
+  padding: 10px 12px;
+  border: 1px solid #d8e0ea;
+  border-radius: 6px;
+  background: #f1f5f9;
+  color: #334155;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+#gem-bid-filter-panel .filter-btn:hover {
+  background: #e2e8f0;
+  border-color: #cbd5e1;
+}
+
+#gem-bid-filter-panel .filter-btn.active {
+  background: var(--gem-accent-dark);
+  color: #ffffff;
+  border-color: var(--gem-accent-dark);
+}
+
+#gem-bid-filter-panel .filter-btn.full-width {
+  grid-column: 1 / -1;
+}
+
+#gem-bid-filter-panel .filter-btn.reset-btn {
+  background: #ffffff;
+  border: 1px solid var(--gem-danger);
+  color: var(--gem-danger);
+}
+
+#gem-bid-filter-panel .filter-btn.reset-btn:hover {
+  background: #fef2f2;
+}
+
+/* Status Bar */
+#gem-bid-filter-panel .status-bar {
+  background: #f0fff4;
+  border: 1px solid #9ae6b4;
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: #276749;
+  text-align: center;
+}
+
+#gem-bid-filter-panel .status-bar.warning {
+  background: #fffaf0;
+  border-color: #fbd38d;
+  color: #975a16;
+}
+
+#gem-bid-filter-panel .status-bar.info {
+  background: #ebf8ff;
+  border-color: #90cdf4;
+  color: #2b6cb0;
+}
+
+/* Panel Collapsed State */
+#gem-bid-filter-panel.collapsed .panel-body {
+  display: none;
+}
+
+/* ============================================
+   BID CARD HIGHLIGHTING
+   ============================================ */
+
+/* Today's Bids - Green Highlight */
+.gem-bid-highlight-today {
+  border-left: 4px solid #38a169 !important;
+  background: linear-gradient(90deg, #f0fff4 0%, transparent 100%) !important;
+  position: relative;
+}
+
+.gem-bid-highlight-today::before {
+  content: 'NEW TODAY';
+  position: absolute;
+  top: 5px;
+  right: 10px;
+  background: #38a169;
+  color: #ffffff;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+/* This Week's Bids - Blue Highlight */
+.gem-bid-highlight-week {
+  border-left: 4px solid #3182ce !important;
+  background: linear-gradient(90deg, #ebf8ff 0%, transparent 100%) !important;
+}
+
+/* Hidden Bids */
+.gem-bid-hidden {
+  display: none !important;
+}
+
+/* Dimmed Bids (alternative to hiding) */
+.gem-bid-dimmed {
+  opacity: 0.4;
+}

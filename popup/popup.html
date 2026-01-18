@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GeM Bid Filter</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="popup-container">
+    <div class="popup-header">
+      <h1>GeM Bid Filter</h1>
+      <p>Sort and filter bids by Start Date</p>
+    </div>
+
+    <div class="popup-body">
+      <div class="status-section">
+        <div id="connection-status" class="status-indicator">
+          <span class="status-dot"></span>
+          <span class="status-text">Checking page...</span>
+        </div>
+      </div>
+
+      <div class="info-section">
+        <h3>How to use:</h3>
+        <ol>
+          <li>Go to the GeM bid listing page</li>
+          <li>Use the floating panel to filter bids</li>
+          <li>Click "Today's Bids" to see new opportunities</li>
+        </ol>
+      </div>
+
+      <div class="settings-section">
+        <h3>Settings</h3>
+        <label class="setting-item">
+          <input type="checkbox" id="auto-highlight" checked>
+          <span>Auto-highlight today's bids</span>
+        </label>
+        <label class="setting-item">
+          <input type="checkbox" id="hide-old-bids">
+          <span>Hide bids older than 7 days</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="popup-footer">
+      <p>Version 1.0.0</p>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

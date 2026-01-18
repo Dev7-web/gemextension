@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "GeM Bid Filter - Sort by Newest",
+  "version": "1.0.0",
+  "description": "Filter and sort GeM bids by Start Date to see newest opportunities first",
+  "permissions": [
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://bidplus.gem.gov.in/*",
+    "https://gem.gov.in/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://bidplus.gem.gov.in/all-bids*",
+        "https://bidplus.gem.gov.in/advance-search*"
+      ],
+      "js": ["content/content.js"],
+      "css": ["content/content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
