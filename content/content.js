@@ -9,6 +9,8 @@
   const CONFIG = {
     panelId: 'gem-bid-filter-panel',
     statusId: 'gem-bid-filter-status',
+    scanStatusId: 'gem-bid-filter-scan-status',
+    scanResultsId: 'gem-bid-filter-scan-results',
     highlightClass: 'gem-bid-highlight-today',
     weekHighlightClass: 'gem-bid-highlight-week',
     hideClass: 'gem-bid-hidden',
@@ -114,7 +116,9 @@
 
   const DOMParser = {
     // Find all bid cards on the page
-    findBidCards: function() {
+    findBidCards: function(root) {
+      const scope = root || document;
+      const searchRoot = scope.body || scope;
       const selectors = [
         '.bid-card',
         '.bid-card-list .card',
@@ -130,7 +134,7 @@
       const cards = [];
 
       selectors.forEach((selector) => {
-        const nodes = Array.from(document.querySelectorAll(selector));
+        const nodes = Array.from(searchRoot.querySelectorAll(selector));
         nodes.forEach((node) => {
           const candidate = promoteCardElement(node);
           if (candidate && elementLooksLikeCard(candidate)) {
@@ -145,11 +149,11 @@
       }
 
       // Fallback: scan text nodes for "Start Date" or "Bid No" and walk up to a card-like container
-      const labelNodes = findTextNodes(document.body, /(start\s*date|bid\s*no)/i);
+      const labelNodes = findTextNodes(searchRoot, /(start\s*date|bid\s*no)/i);
       const fallbackCards = new Set();
 
       labelNodes.forEach((node) => {
-        const card = findCardContainerFromNode(node.parentElement);
+        const card = findCardContainerFromNode(node.parentElement, searchRoot);
         if (card) {
           fallbackCards.add(card);
         }
@@ -159,7 +163,7 @@
     },
 
     // Extract data from a single bid card
-    parseBidCard: function(cardElement, commonAncestor) {
+    parseBidCard: function(cardElement, commonAncestor, baseUrl, pageNumber) {
       if (!cardElement) return null;
 
       const bidNo = extractLabelValue(cardElement, [
@@ -209,6 +213,8 @@
       const endDate = endDateText ? DateUtils.parseGemDate(endDateText) : null;
 
       const sortElement = this.getSortElement(cardElement, commonAncestor);
+      const resolvedBase = baseUrl || window.location.href;
+      const bidLink = extractBidLink(cardElement, bidNo, resolvedBase);
 
       return {
         bidNo: bidNo || '',
@@ -220,18 +226,34 @@
         endDate: endDate,
         endDateRaw: endDateText || '',
         element: cardElement,
-        sortElement: sortElement
+        sortElement: sortElement,
+        bidLink: bidLink || '',
+        sourceUrl: resolvedBase,
+        pageNumber: pageNumber || null
       };
     },
 
     // Parse all bids on current page
-    parseAllBids: function() {
+    parseAllBids: function(options) {
+      const opts = options || {};
       const cards = this.findBidCards();
       const commonAncestor = this.findCommonAncestor(cards);
-      const bids = cards.map((card) => this.parseBidCard(card, commonAncestor)).filter(Boolean);
+      const baseUrl = opts.baseUrl || window.location.href;
+      const pageNumber = opts.pageNumber || null;
+      const bids = cards.map((card) => this.parseBidCard(card, commonAncestor, baseUrl, pageNumber)).filter(Boolean);
       const sortElements = bids.map((bid) => bid.sortElement || bid.element).filter(Boolean);
       this.cacheOriginalOrder(sortElements);
       return bids;
+    },
+
+    parseAllBidsFromRoot: function(root, options) {
+      if (!root) return [];
+      const opts = options || {};
+      const cards = this.findBidCards(root);
+      const commonAncestor = this.findCommonAncestor(cards);
+      const baseUrl = opts.baseUrl || (root.URL || window.location.href);
+      const pageNumber = opts.pageNumber || null;
+      return cards.map((card) => this.parseBidCard(card, commonAncestor, baseUrl, pageNumber)).filter(Boolean);
     },
 
     cacheOriginalOrder: function(elements) {
@@ -349,6 +371,189 @@
   };
 
   // ============================================
+  // PAGINATION UTILITIES
+  // ============================================
+
+  const PaginationUtils = {
+    getPageInfo: function() {
+      const info = {
+        totalPages: 0,
+        currentPage: 1,
+        pageSize: 0,
+        totalRecords: 0
+      };
+
+      const summary = this.getSummaryInfo();
+      if (summary) {
+        info.pageSize = summary.end - summary.start + 1;
+        info.totalRecords = summary.total;
+        if (info.pageSize > 0) {
+          info.totalPages = Math.ceil(info.totalRecords / info.pageSize);
+          info.currentPage = Math.ceil(summary.end / info.pageSize);
+        }
+      }
+
+      const pageNumbers = this.getPaginationNumbers();
+      if (pageNumbers.length > 0) {
+        const maxPage = Math.max.apply(null, pageNumbers);
+        info.totalPages = Math.max(info.totalPages, maxPage);
+      }
+
+      const detectedCurrent = this.getCurrentPageNumber();
+      if (detectedCurrent) {
+        info.currentPage = detectedCurrent;
+      }
+
+      return info;
+    },
+
+    getSummaryInfo: function() {
+      const bodyText = normalizeWhitespace(document.body ? document.body.textContent || '' : '');
+      if (!bodyText) return null;
+      const regex = /showing\s+(\d+)\s*(?:-|to)\s*(\d+)\s*(?:records\s*)?of\s*(\d+)/i;
+      const match = bodyText.match(regex);
+      if (!match) return null;
+      return {
+        start: parseInt(match[1], 10),
+        end: parseInt(match[2], 10),
+        total: parseInt(match[3], 10)
+      };
+    },
+
+    getPaginationNumbers: function() {
+      const elements = Array.from(document.querySelectorAll('a, button, li'));
+      const numbers = [];
+
+      elements.forEach((el) => {
+        const text = normalizeWhitespace(el.textContent || '');
+        if (!/^\d+$/.test(text)) return;
+        const value = parseInt(text, 10);
+        if (isNaN(value) || value <= 0) return;
+
+        const href = el.getAttribute('href') || '';
+        const onclick = el.getAttribute('onclick') || '';
+        const hasHint = /page/i.test(href) || /page/i.test(onclick) || !!el.closest('.pagination');
+        if (hasHint) {
+          numbers.push(value);
+        }
+      });
+
+      return numbers;
+    },
+
+    getCurrentPageNumber: function() {
+      const hashPage = this.getHashPageNumber();
+      if (hashPage) return hashPage;
+
+      const activeSelectors = [
+        '.pagination .active',
+        '.pagination li.active',
+        '.page-item.active',
+        '.pagination .current',
+        '[aria-current=\"page\"]'
+      ];
+
+      for (let i = 0; i < activeSelectors.length; i++) {
+        const el = document.querySelector(activeSelectors[i]);
+        if (el) {
+          const text = normalizeWhitespace(el.textContent || '');
+          const num = parseInt(text, 10);
+          if (!isNaN(num)) return num;
+        }
+      }
+
+      const summary = this.getSummaryInfo();
+      if (summary && summary.start && summary.end) {
+        const pageSize = summary.end - summary.start + 1;
+        if (pageSize > 0) {
+          return Math.ceil(summary.end / pageSize);
+        }
+      }
+
+      return null;
+    },
+
+    getHashPageNumber: function() {
+      const match = window.location.hash.match(/page-?(\d+)/i);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        return isNaN(num) ? null : num;
+      }
+      return null;
+    },
+
+    getPageMode: function() {
+      if (this.getHashPattern()) {
+        return { mode: 'hash' };
+      }
+
+      const builder = this.getPageUrlBuilder();
+      if (builder) {
+        return { mode: 'query', buildUrl: builder };
+      }
+
+      return { mode: 'unknown' };
+    },
+
+    getPageUrlBuilder: function() {
+      const anchors = Array.from(document.querySelectorAll('a[href]'));
+      for (let i = 0; i < anchors.length; i++) {
+        const href = anchors[i].getAttribute('href') || '';
+        const match = href.match(/[?&](page|pageno|pageNo|pageNumber)=(\d+)/i);
+        if (match) {
+          const paramName = match[1];
+          return function(pageNumber) {
+            const url = new URL(href, window.location.href);
+            url.searchParams.set(paramName, String(pageNumber));
+            return url.toString();
+          };
+        }
+      }
+
+      return null;
+    },
+
+    getHashPattern: function() {
+      if (this._hashPattern) return this._hashPattern;
+
+      const hash = window.location.hash || '';
+      if (/page/i.test(hash)) {
+        const match = hash.match(/(.*?)(\d+)(.*)/);
+        if (match) {
+          this._hashPattern = { prefix: match[1] || '#page-', suffix: match[3] || '' };
+          return this._hashPattern;
+        }
+      }
+
+      const anchors = Array.from(document.querySelectorAll('a[href]'));
+      for (let i = 0; i < anchors.length; i++) {
+        const href = anchors[i].getAttribute('href') || '';
+        if (href.indexOf('#') === 0 && /page/i.test(href)) {
+          const match = href.match(/(.*?)(\d+)(.*)/);
+          if (match) {
+            this._hashPattern = { prefix: match[1], suffix: match[3] || '' };
+            return this._hashPattern;
+          }
+        }
+      }
+
+      return null;
+    },
+
+    buildHashUrl: function(pageNumber) {
+      const pattern = this.getHashPattern() || { prefix: '#page-', suffix: '' };
+      const base = window.location.href.split('#')[0];
+      return base + pattern.prefix + pageNumber + pattern.suffix;
+    },
+
+    setHashPage: function(pageNumber) {
+      const pattern = this.getHashPattern() || { prefix: '#page-', suffix: '' };
+      const hashValue = (pattern.prefix + pageNumber + pattern.suffix).replace(/^#/, '');
+      window.location.hash = hashValue;
+    }
+  };
+
+  // ============================================
   // UI MANAGER
   // ============================================
 
@@ -371,6 +576,15 @@
         '    <button class="filter-btn" data-action="sort" type="button">Sort by Newest</button>',
         '    <button class="filter-btn reset-btn full-width" data-action="reset" type="button">Reset</button>',
         '  </div>',
+        '  <div class="section-label">All Pages</div>',
+        '  <div class="button-grid">',
+        '    <button class="filter-btn" data-action="scan-today" type="button">Scan All: Today</button>',
+        '    <button class="filter-btn" data-action="scan-week" type="button">Scan All: This Week</button>',
+        '    <button class="filter-btn full-width" data-action="scan-newest" type="button">Scan All: Newest</button>',
+        '    <button class="filter-btn reset-btn full-width gem-scan-stop" data-action="scan-stop" type="button">Stop Scan</button>',
+        '  </div>',
+        '  <div class="status-bar info" id="' + CONFIG.scanStatusId + '">All-pages scan idle</div>',
+        '  <div class="scan-results" id="' + CONFIG.scanResultsId + '"></div>',
         '  <div class="status-bar info" id="' + CONFIG.statusId + '">Ready</div>',
         '</div>'
       ].join('\n');
@@ -404,6 +618,14 @@
             Controller.sortByNewest();
           } else if (action === 'reset') {
             Controller.reset();
+          } else if (action === 'scan-today') {
+            Controller.scanAllPages('today');
+          } else if (action === 'scan-week') {
+            Controller.scanAllPages('week');
+          } else if (action === 'scan-newest') {
+            Controller.scanAllPages('newest');
+          } else if (action === 'scan-stop') {
+            Controller.stopScan();
           }
         });
       });
@@ -420,6 +642,109 @@
       } else {
         status.classList.add('info');
       }
+    },
+
+    updateScanStatus: function(message, type) {
+      const status = document.getElementById(CONFIG.scanStatusId);
+      if (!status) return;
+
+      status.textContent = message;
+      status.classList.remove('info', 'warning');
+      if (type === 'warning') {
+        status.classList.add('warning');
+      } else {
+        status.classList.add('info');
+      }
+    },
+
+    setScanRunning: function(isRunning) {
+      const panel = document.getElementById(CONFIG.panelId);
+      if (!panel) return;
+
+      const scanButtons = panel.querySelectorAll('[data-action^="scan-"]');
+      scanButtons.forEach((button) => {
+        const action = button.getAttribute('data-action');
+        if (action === 'scan-stop') return;
+        button.disabled = isRunning;
+      });
+
+      const stopButton = panel.querySelector('.gem-scan-stop');
+      if (stopButton) {
+        stopButton.style.display = isRunning ? 'inline-flex' : 'none';
+        stopButton.disabled = !isRunning;
+      }
+    },
+
+    clearScanResults: function() {
+      const container = document.getElementById(CONFIG.scanResultsId);
+      if (!container) return;
+      container.textContent = '';
+      container.classList.remove('active');
+    },
+
+    renderScanResults: function(results, meta) {
+      const container = document.getElementById(CONFIG.scanResultsId);
+      if (!container) return;
+
+      container.textContent = '';
+      container.classList.add('active');
+
+      const maxShown = meta && meta.maxShown ? meta.maxShown : 50;
+      const total = results ? results.length : 0;
+
+      const summary = document.createElement('div');
+      summary.className = 'scan-summary';
+      summary.textContent = total > maxShown
+        ? ('Showing ' + maxShown + ' of ' + total + ' matches')
+        : ('Found ' + total + ' matches');
+      container.appendChild(summary);
+
+      if (!results || results.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'scan-empty';
+        empty.textContent = 'No matches found.';
+        container.appendChild(empty);
+        return;
+      }
+
+      const shown = results.slice(0, maxShown);
+      shown.forEach((bid) => {
+        const item = document.createElement('div');
+        item.className = 'scan-result-item';
+
+        const title = document.createElement('div');
+        title.className = 'scan-result-title';
+
+        const linkUrl = safeUrl(bid.bidLink || bid.sourceUrl);
+        if (linkUrl) {
+          const link = document.createElement('a');
+          link.href = linkUrl;
+          link.target = '_blank';
+          link.rel = 'noopener';
+          link.textContent = bid.bidNo || 'Open bid';
+          title.appendChild(link);
+        } else {
+          title.textContent = bid.bidNo || 'Bid';
+        }
+
+        const metaLine = document.createElement('div');
+        metaLine.className = 'scan-result-meta';
+        const startText = bid.startDateRaw || (bid.startDate ? bid.startDate.toLocaleString() : 'Unknown start date');
+        const pageText = bid.pageNumber ? ('Page ' + bid.pageNumber) : 'Page unknown';
+        metaLine.textContent = 'Start: ' + startText + ' | ' + pageText;
+
+        item.appendChild(title);
+        item.appendChild(metaLine);
+
+        if (bid.items) {
+          const desc = document.createElement('div');
+          desc.className = 'scan-result-desc';
+          desc.textContent = bid.items;
+          item.appendChild(desc);
+        }
+
+        container.appendChild(item);
+      });
     },
 
     setActiveButton: function(action) {
@@ -513,6 +838,175 @@
   };
 
   // ============================================
+  // SCAN MANAGER
+  // ============================================
+
+  const ScanManager = {
+    running: false,
+    abort: false,
+    results: [],
+    seen: new Set(),
+    lastMode: null,
+
+    scan: async function(mode) {
+      if (this.running) return;
+      this.running = true;
+      this.abort = false;
+      this.results = [];
+      this.seen = new Set();
+      this.lastMode = mode;
+
+      UIManager.setScanRunning(true);
+      UIManager.clearScanResults();
+      UIManager.updateScanStatus('Preparing scan...', 'info');
+
+      const pageInfo = PaginationUtils.getPageInfo();
+      if (!pageInfo.totalPages || pageInfo.totalPages < 1) {
+        UIManager.updateScanStatus('Could not detect total pages', 'warning');
+        this.running = false;
+        UIManager.setScanRunning(false);
+        return;
+      }
+
+      const pageMode = PaginationUtils.getPageMode();
+      let errorCount = 0;
+
+      if (pageMode.mode === 'hash') {
+        errorCount = await this.scanByHash(pageInfo, mode);
+      } else if (pageMode.mode === 'query' && pageMode.buildUrl) {
+        errorCount = await this.scanByFetch(pageInfo, mode, pageMode.buildUrl);
+      } else {
+        UIManager.updateScanStatus('Unable to detect pagination pattern', 'warning');
+        this.running = false;
+        UIManager.setScanRunning(false);
+        return;
+      }
+
+      this.finishScan(false, pageInfo, errorCount);
+    },
+
+    stop: function() {
+      if (!this.running) return;
+      this.abort = true;
+      UIManager.updateScanStatus('Stopping scan...', 'warning');
+    },
+
+    finishScan: function(stoppedEarly, pageInfo, errorCount) {
+      this.running = false;
+      UIManager.setScanRunning(false);
+
+      this.sortResults();
+      UIManager.renderScanResults(this.results, { maxShown: 50 });
+
+      if (stoppedEarly || this.abort) {
+        UIManager.updateScanStatus('Scan stopped. Found ' + this.results.length + ' matches.', 'warning');
+        return;
+      }
+
+      const errorText = errorCount > 0 ? (' Completed with ' + errorCount + ' errors.') : '';
+      UIManager.updateScanStatus('Scan complete. Found ' + this.results.length + ' matches.' + errorText, 'info');
+    },
+
+    sortResults: function() {
+      this.results.sort((a, b) => {
+        const timeA = a.startDate ? a.startDate.getTime() : 0;
+        const timeB = b.startDate ? b.startDate.getTime() : 0;
+        return timeB - timeA;
+      });
+    },
+
+    scanByFetch: async function(pageInfo, mode, buildUrl) {
+      const total = pageInfo.totalPages;
+      let errorCount = 0;
+
+      for (let page = 1; page <= total; page++) {
+        if (this.abort) break;
+        UIManager.updateScanStatus('Scanning page ' + page + ' of ' + total, 'info');
+
+        const url = buildUrl(page);
+        try {
+          const response = await fetch(url, { credentials: 'include' });
+          if (!response.ok) {
+            errorCount += 1;
+            continue;
+          }
+
+          const html = await response.text();
+          const doc = new window.DOMParser().parseFromString(html, 'text/html');
+          const bids = DOMParser.parseAllBidsFromRoot(doc, { baseUrl: url, pageNumber: page });
+          this.processBids(bids, mode, page, url);
+        } catch (error) {
+          errorCount += 1;
+        }
+
+        await sleep(150);
+      }
+
+      return errorCount;
+    },
+
+    scanByHash: async function(pageInfo, mode) {
+      const total = pageInfo.totalPages;
+      const originalHash = window.location.hash;
+      let errorCount = 0;
+      let previousSignature = getPageSignature();
+
+      for (let page = 1; page <= total; page++) {
+        if (this.abort) break;
+        UIManager.updateScanStatus('Scanning page ' + page + ' of ' + total, 'info');
+
+        const currentPage = PaginationUtils.getCurrentPageNumber();
+        if (currentPage !== page) {
+          PaginationUtils.setHashPage(page);
+          const changed = await waitForPageUpdate(page, previousSignature, 15000, () => this.abort);
+          if (!changed) {
+            errorCount += 1;
+          }
+        }
+
+        previousSignature = getPageSignature();
+        const pageUrl = PaginationUtils.buildHashUrl(page);
+        const bids = DOMParser.parseAllBids({ baseUrl: pageUrl, pageNumber: page });
+        this.processBids(bids, mode, page, pageUrl);
+
+        await sleep(150);
+      }
+
+      if (originalHash) {
+        window.location.hash = originalHash.replace(/^#/, '');
+      }
+
+      return errorCount;
+    },
+
+    processBids: function(bids, mode, pageNumber, sourceUrl) {
+      const filtered = bids.filter((bid) => {
+        if (!bid.startDate) return false;
+        if (mode === 'today') return DateUtils.isToday(bid.startDate);
+        if (mode === 'week') return DateUtils.isWithinDays(bid.startDate, 7);
+        if (mode === 'newest') return true;
+        return false;
+      });
+
+      filtered.forEach((bid) => {
+        const key = buildBidKey(bid);
+        if (this.seen.has(key)) return;
+        this.seen.add(key);
+
+        this.results.push({
+          bidNo: bid.bidNo,
+          items: bid.items,
+          startDate: bid.startDate,
+          startDateRaw: bid.startDateRaw,
+          bidLink: bid.bidLink,
+          sourceUrl: sourceUrl || bid.sourceUrl,
+          pageNumber: bid.pageNumber || pageNumber
+        });
+      });
+    }
+  };
+
+  // ============================================
   // MAIN CONTROLLER
   // ============================================
 
@@ -539,6 +1033,7 @@
       this.observePageChanges();
       this.registerSettingsListener();
       UIManager.updateStatus('Ready', 'info');
+      UIManager.setScanRunning(false);
     },
 
     loadSettings: function() {
@@ -745,6 +1240,14 @@
       if (this.settings.hideOldBids) {
         this.hideBidsOlderThan(7);
       }
+    },
+
+    scanAllPages: function(mode) {
+      ScanManager.scan(mode);
+    },
+
+    stopScan: function() {
+      ScanManager.stop();
     },
 
     restoreOriginalOrder: function() {
@@ -1006,9 +1509,10 @@
     return null;
   }
 
-  function findCardContainerFromNode(element) {
+  function findCardContainerFromNode(element, root) {
+    const stopRoot = root || document.body;
     let el = element;
-    while (el && el !== document.body) {
+    while (el && el !== stopRoot) {
       if (elementLooksLikeCard(el)) {
         return el;
       }
@@ -1019,6 +1523,96 @@
 
   function isSafeContainer(container) {
     return container && container !== document.body && container !== document.documentElement;
+  }
+
+  function extractBidLink(cardElement, bidNo, baseUrl) {
+    if (!cardElement) return '';
+    const anchors = Array.from(cardElement.querySelectorAll('a[href]'));
+    if (anchors.length === 0) return '';
+
+    if (bidNo) {
+      const match = anchors.find((anchor) => {
+        const text = normalizeWhitespace(anchor.textContent || '');
+        return text.indexOf(bidNo) !== -1;
+      });
+      if (match) {
+        return resolveUrl(match.getAttribute('href'), baseUrl);
+      }
+    }
+
+    const fallback = anchors.find((anchor) => {
+      const text = normalizeWhitespace(anchor.textContent || '');
+      const href = anchor.getAttribute('href') || '';
+      return /gem\//i.test(text) || /bid/i.test(href);
+    });
+
+    const target = fallback || anchors[0];
+    return resolveUrl(target.getAttribute('href'), baseUrl);
+  }
+
+  function resolveUrl(url, baseUrl) {
+    if (!url) return '';
+    try {
+      return new URL(url, baseUrl || window.location.href).toString();
+    } catch (error) {
+      return '';
+    }
+  }
+
+  function safeUrl(url) {
+    if (!url) return '';
+    try {
+      const resolved = new URL(url, window.location.href);
+      if (resolved.protocol === 'http:' || resolved.protocol === 'https:') {
+        return resolved.toString();
+      }
+    } catch (error) {
+      return '';
+    }
+    return '';
+  }
+
+  function buildBidKey(bid) {
+    if (!bid) return '';
+    if (bid.bidNo) return bid.bidNo;
+    const parts = [];
+    if (bid.startDate) parts.push(String(bid.startDate.getTime()));
+    if (bid.startDateRaw) parts.push(bid.startDateRaw);
+    if (bid.items) parts.push(bid.items.slice(0, 80));
+    return parts.join('|');
+  }
+
+  function getPageSignature() {
+    const cards = DOMParser.findBidCards();
+    if (!cards || cards.length === 0) return '';
+    const samples = cards.slice(0, 2).map((card) => {
+      const text = normalizeWhitespace(card.textContent || '');
+      return text.slice(0, 120);
+    });
+    return samples.join('|');
+  }
+
+  async function waitForPageUpdate(targetPage, previousSignature, timeoutMs, shouldAbort) {
+    const start = Date.now();
+    const timeout = timeoutMs || 10000;
+    let lastSignature = previousSignature || '';
+
+    while (Date.now() - start < timeout) {
+      if (shouldAbort && shouldAbort()) return false;
+      const currentPage = PaginationUtils.getCurrentPageNumber();
+      const signature = getPageSignature();
+      const pageMatches = targetPage ? (currentPage === targetPage || !currentPage) : true;
+      if (pageMatches && signature && signature !== lastSignature) {
+        return true;
+      }
+      await sleep(200);
+    }
+
+    return false;
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   // Start the extension

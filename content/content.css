@@ -148,6 +148,79 @@
   color: #2b6cb0;
 }
 
+/* Scan Results */
+#gem-bid-filter-panel .scan-results {
+  margin-top: 10px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 8px;
+  background: #ffffff;
+  display: none;
+}
+
+#gem-bid-filter-panel .scan-results.active {
+  display: block;
+}
+
+#gem-bid-filter-panel .scan-summary {
+  font-size: 11px;
+  color: #475569;
+  margin-bottom: 8px;
+}
+
+#gem-bid-filter-panel .scan-result-item {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  background: #f8fafc;
+}
+
+#gem-bid-filter-panel .scan-result-item:last-child {
+  margin-bottom: 0;
+}
+
+#gem-bid-filter-panel .scan-result-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--gem-accent-dark);
+}
+
+#gem-bid-filter-panel .scan-result-title a {
+  color: inherit;
+  text-decoration: none;
+}
+
+#gem-bid-filter-panel .scan-result-meta {
+  font-size: 11px;
+  color: #64748b;
+  margin-top: 4px;
+}
+
+#gem-bid-filter-panel .scan-result-desc {
+  font-size: 11px;
+  color: #475569;
+  margin-top: 4px;
+}
+
+#gem-bid-filter-panel .scan-empty {
+  font-size: 12px;
+  color: #64748b;
+  text-align: center;
+  padding: 10px 0;
+}
+
+#gem-bid-filter-panel .filter-btn[disabled] {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+#gem-bid-filter-panel .gem-scan-stop {
+  display: none;
+}
+
 /* Panel Collapsed State */
 #gem-bid-filter-panel.collapsed .panel-body {
   display: none;
