@@ -1,11 +1,10 @@
 // ============================================
-// GEM BID FILTER - CONTENT SCRIPT
+// GEM TENDER PUBLISHED DATE SORTER - CONTENT SCRIPT
 // ============================================
 
 (function() {
   'use strict';
 
-  // Configuration
   const CONFIG = {
     panelId: 'gem-bid-filter-panel',
     statusId: 'gem-bid-filter-status',
@@ -16,7 +15,27 @@
     hideClass: 'gem-bid-hidden',
     dimClass: 'gem-bid-dimmed',
     originalOrderAttr: 'data-gem-original-order',
-    startDateAttr: 'data-gem-start-date-ts'
+    listingStartDateAttr: 'data-gem-listing-start-date-ts',
+    publicationDateAttr: 'data-gem-publication-date-ts',
+    publicationDateRawAttr: 'data-gem-publication-date-raw',
+    pdfConcurrency: 4,
+    pdfFetchTimeoutMs: 15000,
+    pdfParseTimeoutMs: 15000,
+    pdfCleanupTimeoutMs: 2000,
+    pageFetchTimeoutMs: 15000,
+    maxShownResults: 100,
+    maxUnavailableShown: 20
+  };
+
+  const PDFJS_CONFIG = {
+    libraryPath: 'vendor/pdfjs/pdf.min.mjs',
+    workerPath: 'vendor/pdfjs/pdf.worker.min.mjs',
+    pagesToRead: 2
+  };
+
+  const CACHE_CONFIG = {
+    storageKey: 'gemBidPublicationDateCacheV1',
+    maxEntries: 5000
   };
 
   // ============================================
@@ -24,65 +43,51 @@
   // ============================================
 
   const DateUtils = {
-    // Parse GeM date format: "DD-MM-YYYY H:MM AM/PM" or "DD-MM-YYYY"
     parseGemDate: function(dateString) {
       if (!dateString) return null;
 
-      let cleaned = dateString.trim();
+      const cleaned = normalizeWhitespace(dateString);
       if (!cleaned) return null;
 
-      // Regex to match the format with time
-      const regex = /(\d{2})-(\d{2})-(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i;
+      const regex = /(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?/i;
       const match = cleaned.match(regex);
-
-      if (!match) {
-        // Try without time
-        const dateOnlyRegex = /(\d{2})-(\d{2})-(\d{4})/;
-        const dateMatch = cleaned.match(dateOnlyRegex);
-        if (dateMatch) {
-          const day = parseInt(dateMatch[1], 10);
-          const month = parseInt(dateMatch[2], 10);
-          const year = parseInt(dateMatch[3], 10);
-          return new Date(year, month - 1, day);
-        }
-        return null;
-      }
+      if (!match) return null;
 
       const day = parseInt(match[1], 10);
       const month = parseInt(match[2], 10);
       const year = parseInt(match[3], 10);
-      const hours = parseInt(match[4], 10);
-      const minutes = parseInt(match[5], 10);
-      const ampm = match[6];
+      let hour = match[4] ? parseInt(match[4], 10) : 0;
+      const minutes = match[5] ? parseInt(match[5], 10) : 0;
+      const seconds = match[6] ? parseInt(match[6], 10) : 0;
+      const ampm = match[7] || '';
 
-      let hour = hours;
       if (ampm.toUpperCase() === 'PM' && hour !== 12) {
         hour += 12;
       } else if (ampm.toUpperCase() === 'AM' && hour === 12) {
         hour = 0;
       }
 
-      return new Date(year, month - 1, day, hour, minutes);
+      const date = new Date(year, month - 1, day, hour, minutes, seconds);
+      if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) {
+        return null;
+      }
+
+      return date;
+    },
+
+    isValidDate: function(date) {
+      return date instanceof Date && !isNaN(date.getTime());
     },
 
     isToday: function(date) {
-      if (!date) return false;
+      if (!this.isValidDate(date)) return false;
       const today = this.stripTime(new Date());
       const target = this.stripTime(date);
       return target.getTime() === today.getTime();
     },
 
-    isYesterday: function(date) {
-      if (!date) return false;
-      const today = this.stripTime(new Date());
-      const yesterday = new Date(today);
-      yesterday.setDate(today.getDate() - 1);
-      const target = this.stripTime(date);
-      return target.getTime() === yesterday.getTime();
-    },
-
     isWithinDays: function(date, days) {
-      if (!date || !days) return false;
+      if (!this.isValidDate(date) || !days) return false;
       const today = this.stripTime(new Date());
       const start = new Date(today);
       start.setDate(today.getDate() - (days - 1));
@@ -90,23 +95,15 @@
       return target >= start && target <= today;
     },
 
-    formatRelative: function(date) {
-      if (!date) return '';
-      if (this.isToday(date)) return 'Today';
-      if (this.isYesterday(date)) return 'Yesterday';
-
-      const today = this.stripTime(new Date());
-      const target = this.stripTime(date);
-      const diffMs = today - target;
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-      if (diffDays > 0) {
-        return diffDays + ' days ago';
-      }
-      return 'Upcoming';
-    },
-
     stripTime: function(date) {
       return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    },
+
+    formatDate: function(date) {
+      if (!this.isValidDate(date)) return '';
+      const day = String(date.getDate()).padStart(2, '0');
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      return day + '-' + month + '-' + date.getFullYear();
     }
   };
 
@@ -115,7 +112,6 @@
   // ============================================
 
   const DOMParser = {
-    // Find all bid cards on the page
     findBidCards: function(root) {
       const scope = root || document;
       const searchRoot = scope.body || scope;
@@ -148,7 +144,6 @@
         return unique;
       }
 
-      // Fallback: scan text nodes for "Start Date" or "Bid No" and walk up to a card-like container
       const labelNodes = findTextNodes(searchRoot, /(start\s*date|bid\s*no)/i);
       const fallbackCards = new Set();
 
@@ -162,85 +157,93 @@
       return Array.from(fallbackCards);
     },
 
-    // Extract data from a single bid card
-    parseBidCard: function(cardElement, commonAncestor, baseUrl, pageNumber) {
+    parseBidCard: function(cardElement, commonAncestor, baseUrl, pageNumber, scanOrder) {
       if (!cardElement) return null;
 
-      const bidNo = extractLabelValue(cardElement, [
-        /bid\s*no\b/i,
-        /bid\s*number\b/i
-      ]);
-
-      const items = extractLabelValue(cardElement, [
+      const bidNo = extractBidNo(cardElement);
+      const items = trimExtractedValue(extractLabelValue(cardElement, [
         /items?\b/i,
         /description\b/i
-      ]);
-
-      const quantity = extractLabelValue(cardElement, [
+      ]));
+      const quantity = trimExtractedValue(extractLabelValue(cardElement, [
         /quantity\b/i
-      ]);
-
-      const department = extractLabelValue(cardElement, [
+      ]));
+      const department = trimExtractedValue(extractLabelValue(cardElement, [
         /department\s*name\s*and\s*address\b/i,
         /department\b/i,
         /ministry\b/i
-      ]);
-
-      const startDateText = extractLabelValue(cardElement, [
+      ]));
+      const listingStartDateRaw = extractLabelValue(cardElement, [
         /start\s*date\b/i
       ]);
-
-      const endDateText = extractLabelValue(cardElement, [
+      const listingEndDateRaw = extractLabelValue(cardElement, [
         /end\s*date\b/i
       ]);
 
-      let startDate = null;
-      const cachedTs = cardElement.getAttribute(CONFIG.startDateAttr);
-      if (cachedTs && !startDateText) {
-        const ts = parseInt(cachedTs, 10);
+      let listingStartDate = null;
+      const cachedListingTs = cardElement.getAttribute(CONFIG.listingStartDateAttr);
+      if (cachedListingTs && !listingStartDateRaw) {
+        const ts = parseInt(cachedListingTs, 10);
         if (!isNaN(ts)) {
-          startDate = new Date(ts);
+          listingStartDate = new Date(ts);
         }
       }
 
-      if (!startDate && startDateText) {
-        startDate = DateUtils.parseGemDate(startDateText);
-        if (startDate) {
-          cardElement.setAttribute(CONFIG.startDateAttr, String(startDate.getTime()));
+      if (!listingStartDate && listingStartDateRaw) {
+        listingStartDate = DateUtils.parseGemDate(listingStartDateRaw);
+        if (listingStartDate) {
+          cardElement.setAttribute(CONFIG.listingStartDateAttr, String(listingStartDate.getTime()));
         }
       }
 
-      const endDate = endDateText ? DateUtils.parseGemDate(endDateText) : null;
-
+      const listingEndDate = listingEndDateRaw ? DateUtils.parseGemDate(listingEndDateRaw) : null;
       const sortElement = this.getSortElement(cardElement, commonAncestor);
       const resolvedBase = baseUrl || window.location.href;
-      const bidLink = extractBidLink(cardElement, bidNo, resolvedBase);
+      const bidDocumentUrl = extractBidLink(cardElement, bidNo, resolvedBase);
+      const publicationDate = readElementPublicationDate(cardElement);
+      const publicationDateRaw = cardElement.getAttribute(CONFIG.publicationDateRawAttr) || '';
 
       return {
         bidNo: bidNo || '',
         items: items || '',
         quantity: quantity || '',
         department: department || '',
-        startDate: startDate,
-        startDateRaw: startDateText || '',
-        endDate: endDate,
-        endDateRaw: endDateText || '',
+        listingStartDate: listingStartDate,
+        listingStartDateRaw: listingStartDateRaw || '',
+        listingEndDate: listingEndDate,
+        listingEndDateRaw: listingEndDateRaw || '',
+        startDate: listingStartDate,
+        startDateRaw: listingStartDateRaw || '',
+        endDate: listingEndDate,
+        endDateRaw: listingEndDateRaw || '',
+        publicationDate: publicationDate,
+        publicationDateRaw: publicationDateRaw,
+        bidDocumentUrl: bidDocumentUrl || '',
+        bidLink: bidDocumentUrl || '',
+        extractionStatus: publicationDate ? 'cached-element' : 'pending',
+        extractionError: '',
         element: cardElement,
         sortElement: sortElement,
-        bidLink: bidLink || '',
         sourceUrl: resolvedBase,
-        pageNumber: pageNumber || null
+        pageNumber: pageNumber || null,
+        sourcePageNumber: pageNumber || null,
+        scanOrder: typeof scanOrder === 'number' ? scanOrder : null
       };
     },
 
-    // Parse all bids on current page
     parseAllBids: function(options) {
       const opts = options || {};
       const cards = this.findBidCards();
       const commonAncestor = this.findCommonAncestor(cards);
       const baseUrl = opts.baseUrl || window.location.href;
       const pageNumber = opts.pageNumber || null;
-      const bids = cards.map((card) => this.parseBidCard(card, commonAncestor, baseUrl, pageNumber)).filter(Boolean);
+      const bids = cards.map((card, index) => this.parseBidCard(
+        card,
+        commonAncestor,
+        baseUrl,
+        pageNumber,
+        typeof opts.scanOrderOffset === 'number' ? opts.scanOrderOffset + index : index
+      )).filter(Boolean);
       const sortElements = bids.map((bid) => bid.sortElement || bid.element).filter(Boolean);
       this.cacheOriginalOrder(sortElements);
       return bids;
@@ -253,7 +256,13 @@
       const commonAncestor = this.findCommonAncestor(cards);
       const baseUrl = opts.baseUrl || (root.URL || window.location.href);
       const pageNumber = opts.pageNumber || null;
-      return cards.map((card) => this.parseBidCard(card, commonAncestor, baseUrl, pageNumber)).filter(Boolean);
+      return cards.map((card, index) => this.parseBidCard(
+        card,
+        commonAncestor,
+        baseUrl,
+        pageNumber,
+        typeof opts.scanOrderOffset === 'number' ? opts.scanOrderOffset + index : index
+      )).filter(Boolean);
     },
 
     cacheOriginalOrder: function(elements) {
@@ -325,48 +334,421 @@
   // ============================================
 
   const FilterEngine = {
-    // Sort bids by start date (newest first)
-    sortByNewest: function(bids) {
-      const withDate = bids.filter((bid) => bid.startDate instanceof Date && !isNaN(bid.startDate));
-      const withoutDate = bids.filter((bid) => !(bid.startDate instanceof Date) || isNaN(bid.startDate));
+    sortByPublicationDate: function(bids) {
+      return (bids || []).slice().sort((a, b) => {
+        const aHasPublication = DateUtils.isValidDate(a.publicationDate);
+        const bHasPublication = DateUtils.isValidDate(b.publicationDate);
 
-      withDate.sort((a, b) => b.startDate.getTime() - a.startDate.getTime());
+        if (aHasPublication && bHasPublication) {
+          const diff = b.publicationDate.getTime() - a.publicationDate.getTime();
+          if (diff !== 0) return diff;
+        } else if (aHasPublication !== bHasPublication) {
+          return aHasPublication ? -1 : 1;
+        }
 
-      if (withoutDate.length > 0) {
-        withoutDate.sort((a, b) => {
-          const elementA = a.sortElement || a.element;
-          const elementB = b.sortElement || b.element;
-          const orderA = elementA ? parseInt(elementA.getAttribute(CONFIG.originalOrderAttr) || '0', 10) : 0;
-          const orderB = elementB ? parseInt(elementB.getAttribute(CONFIG.originalOrderAttr) || '0', 10) : 0;
-          return orderA - orderB;
+        const aHasListing = DateUtils.isValidDate(a.listingStartDate);
+        const bHasListing = DateUtils.isValidDate(b.listingStartDate);
+
+        if (aHasListing && bHasListing) {
+          const listingDiff = b.listingStartDate.getTime() - a.listingStartDate.getTime();
+          if (listingDiff !== 0) return listingDiff;
+        } else if (aHasListing !== bHasListing) {
+          return aHasListing ? -1 : 1;
+        }
+
+        return getStableOrder(a) - getStableOrder(b);
+      });
+    },
+
+    filterPublishedToday: function(bids) {
+      return (bids || []).filter((bid) => DateUtils.isToday(bid.publicationDate));
+    },
+
+    filterPublishedThisWeek: function(bids) {
+      return (bids || []).filter((bid) => DateUtils.isWithinDays(bid.publicationDate, 7));
+    },
+
+    getDateUnavailable: function(bids) {
+      return (bids || []).filter((bid) => {
+        if (DateUtils.isValidDate(bid.publicationDate)) return false;
+        return bid.extractionStatus === 'unavailable' || bid.extractionStatus === 'no-document-url';
+      });
+    },
+
+    getRenderableResults: function(bids) {
+      return (bids || []).filter((bid) => {
+        return DateUtils.isValidDate(bid.publicationDate) ||
+          bid.extractionStatus === 'unavailable' ||
+          bid.extractionStatus === 'no-document-url';
+      });
+    }
+  };
+
+  // ============================================
+  // CACHE MANAGER
+  // ============================================
+
+  const CacheManager = {
+    loaded: false,
+    dirty: false,
+    dirtyCount: 0,
+    cache: {
+      version: 1,
+      entries: {}
+    },
+
+    isAvailable: function() {
+      return typeof chrome !== 'undefined' &&
+        chrome.storage &&
+        chrome.storage.local;
+    },
+
+    load: async function() {
+      if (this.loaded) return;
+      this.loaded = true;
+
+      if (!this.isAvailable()) return;
+
+      try {
+        const result = await chromeStorageGet('local', [CACHE_CONFIG.storageKey]);
+        const stored = result && result[CACHE_CONFIG.storageKey];
+        if (stored && stored.entries && typeof stored.entries === 'object') {
+          this.cache = stored;
+        }
+      } catch (error) {
+        this.cache = { version: 1, entries: {} };
+      }
+    },
+
+    get: function(bid) {
+      const key = this.makeKey(bid);
+      if (!key || !this.cache.entries[key]) return null;
+
+      const entry = this.cache.entries[key];
+      const date = entry.publicationDateTs ? new Date(entry.publicationDateTs) : null;
+      if (!DateUtils.isValidDate(date)) return null;
+
+      return {
+        publicationDate: date,
+        publicationDateRaw: entry.publicationDateRaw || DateUtils.formatDate(date),
+        pdfBidNo: entry.pdfBidNo || '',
+        updatedAt: entry.updatedAt || 0
+      };
+    },
+
+    set: function(bid, data) {
+      const key = this.makeKey(bid);
+      if (!key || !data || !DateUtils.isValidDate(data.publicationDate)) return;
+
+      this.cache.entries[key] = {
+        publicationDateTs: data.publicationDate.getTime(),
+        publicationDateRaw: data.publicationDateRaw || DateUtils.formatDate(data.publicationDate),
+        pdfBidNo: data.pdfBidNo || '',
+        updatedAt: Date.now()
+      };
+
+      this.dirty = true;
+      this.dirtyCount += 1;
+    },
+
+    flushIfNeeded: async function(force) {
+      if (!force && this.dirtyCount < 25) return;
+      await this.flush();
+    },
+
+    flush: async function() {
+      if (!this.dirty || !this.isAvailable()) return;
+
+      this.prune(CACHE_CONFIG.maxEntries);
+
+      try {
+        await chromeStorageSet('local', {
+          [CACHE_CONFIG.storageKey]: this.cache
         });
+        this.dirty = false;
+        this.dirtyCount = 0;
+      } catch (error) {
+        this.prune(Math.floor(CACHE_CONFIG.maxEntries / 2));
+        try {
+          await chromeStorageSet('local', {
+            [CACHE_CONFIG.storageKey]: this.cache
+          });
+          this.dirty = false;
+          this.dirtyCount = 0;
+        } catch (secondError) {
+          this.dirty = true;
+        }
+      }
+    },
+
+    prune: function(maxEntries) {
+      const entries = this.cache.entries || {};
+      const keys = Object.keys(entries);
+      if (keys.length <= maxEntries) return;
+
+      keys.sort((a, b) => {
+        const aTime = entries[a] && entries[a].updatedAt ? entries[a].updatedAt : 0;
+        const bTime = entries[b] && entries[b].updatedAt ? entries[b].updatedAt : 0;
+        return bTime - aTime;
+      });
+
+      keys.slice(maxEntries).forEach((key) => {
+        delete entries[key];
+      });
+    },
+
+    makeKey: function(bid) {
+      if (!bid) return '';
+      const bidNo = bid.bidNo || 'unknown-bid';
+      const url = bid.bidDocumentUrl || bid.bidLink || '';
+      if (!url) return '';
+      return bidNo + '|' + url;
+    }
+  };
+
+  // ============================================
+  // PDF DATE EXTRACTOR
+  // ============================================
+
+  const PDFDateExtractor = {
+    pdfjsPromise: null,
+
+    loadPdfJs: async function() {
+      if (this.pdfjsPromise) return this.pdfjsPromise;
+
+      this.pdfjsPromise = import(chrome.runtime.getURL(PDFJS_CONFIG.libraryPath)).then((pdfjsLib) => {
+        pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL(PDFJS_CONFIG.workerPath);
+        return pdfjsLib;
+      });
+
+      return this.pdfjsPromise;
+    },
+
+    enrichBid: async function(bid, options) {
+      const opts = options || {};
+      if (!bid) return bid;
+      if (DateUtils.isValidDate(bid.publicationDate)) {
+        bid.extractionStatus = bid.extractionStatus || 'ok';
+        return bid;
       }
 
-      return withDate.concat(withoutDate);
+      await CacheManager.load();
+      const cached = CacheManager.get(bid);
+      if (cached) {
+        applyPublicationDate(bid, cached.publicationDate, cached.publicationDateRaw, 'cached', cached.pdfBidNo);
+        return bid;
+      }
+
+      if (!bid.bidDocumentUrl) {
+        bid.extractionStatus = 'no-document-url';
+        bid.extractionError = 'No bid document link found';
+        return bid;
+      }
+
+      try {
+        const extracted = await this.extractFromUrl(bid.bidDocumentUrl, {
+          signal: opts.signal,
+          controllerRegistry: opts.controllerRegistry,
+          fetchTimeoutMs: opts.fetchTimeoutMs || CONFIG.pdfFetchTimeoutMs,
+          parseTimeoutMs: opts.parseTimeoutMs || CONFIG.pdfParseTimeoutMs
+        });
+        applyPublicationDate(
+          bid,
+          extracted.publicationDate,
+          extracted.publicationDateRaw,
+          'ok',
+          extracted.pdfBidNo
+        );
+        CacheManager.set(bid, extracted);
+        await CacheManager.flushIfNeeded(false);
+      } catch (error) {
+        markBidUnavailable(bid, error);
+      }
+
+      return bid;
     },
 
-    // Filter to only today's bids
-    filterToday: function(bids) {
-      return bids.filter((bid) => DateUtils.isToday(bid.startDate));
+    extractFromUrl: async function(url, options) {
+      const opts = Object.assign({
+        signal: null,
+        controllerRegistry: null,
+        fetchTimeoutMs: CONFIG.pdfFetchTimeoutMs,
+        parseTimeoutMs: CONFIG.pdfParseTimeoutMs
+      }, options || {});
+      const tracked = createTrackedAbortController(opts.controllerRegistry);
+      const controller = tracked.controller;
+      let externalAbortHandler = null;
+
+      if (opts.signal) {
+        if (opts.signal.aborted) {
+          controller.abort();
+        } else {
+          externalAbortHandler = () => controller.abort();
+          opts.signal.addEventListener('abort', externalAbortHandler, { once: true });
+        }
+      }
+
+      try {
+        const totalTimeoutMs = (opts.fetchTimeoutMs || 0) + (opts.parseTimeoutMs || 0);
+        return await withTimeout(
+          this.extractFromUrlWithController(url, opts, controller),
+          totalTimeoutMs,
+          'PDF processing timed out',
+          () => controller.abort()
+        );
+      } finally {
+        if (opts.signal && externalAbortHandler) {
+          opts.signal.removeEventListener('abort', externalAbortHandler);
+        }
+        tracked.release();
+      }
     },
 
-    // Filter to this week's bids
-    filterThisWeek: function(bids) {
-      return bids.filter((bid) => DateUtils.isWithinDays(bid.startDate, 7));
+    extractFromUrlWithController: async function(url, options, controller) {
+      const response = await withTimeout(fetch(url, {
+        credentials: 'include',
+        cache: 'no-store',
+        signal: controller.signal
+      }), options.fetchTimeoutMs, 'PDF fetch timed out', () => controller.abort());
+
+      if (!response.ok) {
+        throw new Error('PDF request failed: HTTP ' + response.status);
+      }
+
+      const arrayBuffer = await withTimeout(
+        response.arrayBuffer(),
+        options.fetchTimeoutMs,
+        'PDF fetch timed out',
+        () => controller.abort()
+      );
+      let extracted = null;
+      let pdfError = null;
+
+      try {
+        extracted = await this.extractWithPdfJs(arrayBuffer, {
+          parseTimeoutMs: options.parseTimeoutMs
+        });
+      } catch (error) {
+        pdfError = error;
+      }
+
+      if (!extracted || !DateUtils.isValidDate(extracted.publicationDate)) {
+        extracted = extractPublicationInfoFromText(extractTextFallback(arrayBuffer));
+      }
+
+      if (!extracted || !DateUtils.isValidDate(extracted.publicationDate)) {
+        if (pdfError && pdfError.message) {
+          throw new Error('Dated field not found in PDF: ' + pdfError.message);
+        }
+        throw new Error('Dated field not found in PDF');
+      }
+
+      return extracted;
     },
 
-    // Filter to custom date range
-    filterDateRange: function(bids, fromDate, toDate) {
-      const from = fromDate ? DateUtils.stripTime(fromDate) : null;
-      const to = toDate ? DateUtils.stripTime(toDate) : null;
+    extractWithPdfJs: async function(arrayBuffer, options) {
+      const opts = Object.assign({
+        parseTimeoutMs: CONFIG.pdfParseTimeoutMs
+      }, options || {});
+      let loadingTask = null;
+      let pdf = null;
 
-      return bids.filter((bid) => {
-        if (!bid.startDate) return false;
-        const target = DateUtils.stripTime(bid.startDate);
-        if (from && target < from) return false;
-        if (to && target > to) return false;
-        return true;
-      });
+      const parseWork = async () => {
+        const pdfjsLib = await this.loadPdfJs();
+        loadingTask = pdfjsLib.getDocument({
+          data: new Uint8Array(arrayBuffer),
+          disableFontFace: true,
+          isEvalSupported: false,
+          useSystemFonts: true
+        });
+
+        pdf = await loadingTask.promise;
+        const maxPages = Math.min(pdf.numPages, PDFJS_CONFIG.pagesToRead);
+        let text = '';
+
+        for (let pageNumber = 1; pageNumber <= maxPages; pageNumber++) {
+          const page = await pdf.getPage(pageNumber);
+          const content = await page.getTextContent();
+          const pageText = content.items.map((item) => item && item.str ? item.str : '').join(' ');
+          text += pageText + '\n';
+        }
+
+        return extractPublicationInfoFromText(text);
+      };
+
+      try {
+        return await withTimeout(parseWork(), opts.parseTimeoutMs, 'PDF parse timed out', () => {
+          destroyPdfResource(pdf);
+          destroyPdfResource(loadingTask);
+        });
+      } finally {
+        await destroyPdfResource(pdf);
+        if (!pdf) {
+          await destroyPdfResource(loadingTask);
+        }
+      }
+    }
+  };
+
+  // ============================================
+  // BID ENRICHER
+  // ============================================
+
+  const BidsEnricher = {
+    enrichBids: async function(bids, options) {
+      const list = bids || [];
+      const opts = Object.assign({
+        concurrency: CONFIG.pdfConcurrency,
+        controllerRegistry: null,
+        fetchTimeoutMs: CONFIG.pdfFetchTimeoutMs,
+        parseTimeoutMs: CONFIG.pdfParseTimeoutMs,
+        onProgress: null,
+        shouldAbort: null
+      }, options || {});
+
+      await CacheManager.load();
+
+      let nextIndex = 0;
+      let completed = 0;
+      const workerCount = Math.min(Math.max(opts.concurrency || 1, 1), list.length || 1);
+
+      const worker = async () => {
+        while (nextIndex < list.length) {
+          if (opts.shouldAbort && opts.shouldAbort()) break;
+          const index = nextIndex;
+          nextIndex += 1;
+
+          const bid = list[index];
+          const tracked = createTrackedAbortController(opts.controllerRegistry);
+          try {
+            const maxBidMs = (opts.fetchTimeoutMs || 0) + (opts.parseTimeoutMs || 0) + CONFIG.pdfCleanupTimeoutMs;
+            await withTimeout(PDFDateExtractor.enrichBid(bid, {
+              signal: tracked.controller.signal,
+              controllerRegistry: opts.controllerRegistry,
+              fetchTimeoutMs: opts.fetchTimeoutMs,
+              parseTimeoutMs: opts.parseTimeoutMs
+            }), maxBidMs, 'PDF processing timed out', () => tracked.controller.abort());
+          } catch (error) {
+            markBidUnavailable(bid, error);
+          } finally {
+            tracked.release();
+            completed += 1;
+
+            if (opts.onProgress) {
+              opts.onProgress(completed, list.length, bid);
+            }
+          }
+        }
+      };
+
+      const workers = [];
+      for (let i = 0; i < workerCount; i++) {
+        workers.push(worker());
+      }
+
+      await Promise.all(workers);
+      await CacheManager.flush();
+      return list;
     }
   };
 
@@ -450,7 +832,7 @@
         '.pagination li.active',
         '.page-item.active',
         '.pagination .current',
-        '[aria-current=\"page\"]'
+        '[aria-current="page"]'
       ];
 
       for (let i = 0; i < activeSelectors.length; i++) {
@@ -565,22 +947,22 @@
       panel.id = CONFIG.panelId;
       panel.innerHTML = [
         '<div class="panel-header">',
-        '  <h3>GeM Bid Filter</h3>',
+        '  <h3>GeM Tender Sorter</h3>',
         '  <button class="panel-toggle" aria-label="Toggle panel" type="button">-</button>',
         '</div>',
         '<div class="panel-body">',
-        '  <div class="section-label">Quick Filters</div>',
+        '  <div class="section-label">Current Page</div>',
         '  <div class="button-grid">',
-        '    <button class="filter-btn" data-action="today" type="button">Today\'s Bids</button>',
-        '    <button class="filter-btn" data-action="week" type="button">This Week</button>',
-        '    <button class="filter-btn" data-action="sort" type="button">Sort by Newest</button>',
+        '    <button class="filter-btn" data-action="published-today" type="button">Published Today</button>',
+        '    <button class="filter-btn" data-action="published-week" type="button">Published This Week</button>',
+        '    <button class="filter-btn full-width" data-action="published-sort" type="button">Sort by Published Date</button>',
         '    <button class="filter-btn reset-btn full-width" data-action="reset" type="button">Reset</button>',
         '  </div>',
-        '  <div class="section-label">All Pages</div>',
+        '  <div class="section-label">All Result Pages</div>',
         '  <div class="button-grid">',
         '    <button class="filter-btn" data-action="scan-today" type="button">Scan All: Today</button>',
         '    <button class="filter-btn" data-action="scan-week" type="button">Scan All: This Week</button>',
-        '    <button class="filter-btn full-width" data-action="scan-newest" type="button">Scan All: Newest</button>',
+        '    <button class="filter-btn full-width" data-action="scan-newest" type="button">Scan All: Newest Published</button>',
         '    <button class="filter-btn reset-btn full-width gem-scan-stop" data-action="scan-stop" type="button">Stop Scan</button>',
         '  </div>',
         '  <div class="status-bar info" id="' + CONFIG.scanStatusId + '">All-pages scan idle</div>',
@@ -610,12 +992,12 @@
           const action = button.getAttribute('data-action');
           if (!action) return;
 
-          if (action === 'today') {
-            Controller.showTodaysBids();
-          } else if (action === 'week') {
-            Controller.showThisWeekBids();
-          } else if (action === 'sort') {
-            Controller.sortByNewest();
+          if (action === 'published-today') {
+            Controller.showPublishedToday();
+          } else if (action === 'published-week') {
+            Controller.showPublishedThisWeek();
+          } else if (action === 'published-sort') {
+            Controller.sortByPublicationDate();
           } else if (action === 'reset') {
             Controller.reset();
           } else if (action === 'scan-today') {
@@ -637,11 +1019,7 @@
 
       status.textContent = message;
       status.classList.remove('info', 'warning');
-      if (type === 'warning') {
-        status.classList.add('warning');
-      } else {
-        status.classList.add('info');
-      }
+      status.classList.add(type === 'warning' ? 'warning' : 'info');
     },
 
     updateScanStatus: function(message, type) {
@@ -650,11 +1028,7 @@
 
       status.textContent = message;
       status.classList.remove('info', 'warning');
-      if (type === 'warning') {
-        status.classList.add('warning');
-      } else {
-        status.classList.add('info');
-      }
+      status.classList.add(type === 'warning' ? 'warning' : 'info');
     },
 
     setScanRunning: function(isRunning) {
@@ -675,6 +1049,16 @@
       }
     },
 
+    setCurrentPageBusy: function(isBusy) {
+      const panel = document.getElementById(CONFIG.panelId);
+      if (!panel) return;
+      const actions = ['published-today', 'published-week', 'published-sort'];
+      actions.forEach((action) => {
+        const button = panel.querySelector('[data-action="' + action + '"]');
+        if (button) button.disabled = isBusy;
+      });
+    },
+
     clearScanResults: function() {
       const container = document.getElementById(CONFIG.scanResultsId);
       if (!container) return;
@@ -689,62 +1073,97 @@
       container.textContent = '';
       container.classList.add('active');
 
-      const maxShown = meta && meta.maxShown ? meta.maxShown : 50;
-      const total = results ? results.length : 0;
+      const allResults = results || [];
+      const dated = allResults.filter((bid) => DateUtils.isValidDate(bid.publicationDate));
+      const unavailable = allResults.filter((bid) => !DateUtils.isValidDate(bid.publicationDate));
+      const maxShown = meta && meta.maxShown ? meta.maxShown : CONFIG.maxShownResults;
+      const unavailableLimit = meta && meta.unavailableLimit ? meta.unavailableLimit : CONFIG.maxUnavailableShown;
 
       const summary = document.createElement('div');
       summary.className = 'scan-summary';
-      summary.textContent = total > maxShown
-        ? ('Showing ' + maxShown + ' of ' + total + ' matches')
-        : ('Found ' + total + ' matches');
+      const datedText = dated.length > maxShown
+        ? ('Showing newest ' + maxShown + ' of ' + dated.length + ' dated tenders')
+        : ('Showing ' + dated.length + ' dated tenders');
+      const unavailableText = unavailable.length ? (' | Date unavailable: ' + unavailable.length) : '';
+      summary.textContent = datedText + unavailableText;
       container.appendChild(summary);
 
-      if (!results || results.length === 0) {
+      if (allResults.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'scan-empty';
-        empty.textContent = 'No matches found.';
+        empty.textContent = 'No matching tenders found.';
         container.appendChild(empty);
         return;
       }
 
-      const shown = results.slice(0, maxShown);
-      shown.forEach((bid) => {
-        const item = document.createElement('div');
-        item.className = 'scan-result-item';
-
-        const title = document.createElement('div');
-        title.className = 'scan-result-title';
-
-        const linkUrl = safeUrl(bid.bidLink || bid.sourceUrl);
-        if (linkUrl) {
-          const link = document.createElement('a');
-          link.href = linkUrl;
-          link.target = '_blank';
-          link.rel = 'noopener';
-          link.textContent = bid.bidNo || 'Open bid';
-          title.appendChild(link);
-        } else {
-          title.textContent = bid.bidNo || 'Bid';
-        }
-
-        const metaLine = document.createElement('div');
-        metaLine.className = 'scan-result-meta';
-        const startText = bid.startDateRaw || (bid.startDate ? bid.startDate.toLocaleString() : 'Unknown start date');
-        const pageText = bid.pageNumber ? ('Page ' + bid.pageNumber) : 'Page unknown';
-        metaLine.textContent = 'Start: ' + startText + ' | ' + pageText;
-
-        item.appendChild(title);
-        item.appendChild(metaLine);
-
-        if (bid.items) {
-          const desc = document.createElement('div');
-          desc.className = 'scan-result-desc';
-          desc.textContent = bid.items;
-          item.appendChild(desc);
-        }
-
-        container.appendChild(item);
+      dated.slice(0, maxShown).forEach((bid) => {
+        container.appendChild(this.createResultItem(bid, false));
       });
+
+      if (unavailable.length > 0) {
+        const section = document.createElement('div');
+        section.className = 'scan-result-section';
+        section.textContent = 'Date unavailable';
+        container.appendChild(section);
+
+        unavailable.slice(0, unavailableLimit).forEach((bid) => {
+          container.appendChild(this.createResultItem(bid, true));
+        });
+      }
+    },
+
+    createResultItem: function(bid, unavailable) {
+      const item = document.createElement('div');
+      item.className = 'scan-result-item' + (unavailable ? ' unavailable' : '');
+
+      const title = document.createElement('div');
+      title.className = 'scan-result-title';
+
+      const linkUrl = safeUrl(bid.bidDocumentUrl || bid.bidLink || bid.sourceUrl);
+      if (linkUrl) {
+        const link = document.createElement('a');
+        link.href = linkUrl;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        link.textContent = bid.bidNo || 'Open bid document';
+        title.appendChild(link);
+      } else {
+        title.textContent = bid.bidNo || 'Bid';
+      }
+
+      const metaLine = document.createElement('div');
+      metaLine.className = 'scan-result-meta';
+      const publishedText = bid.publicationDateRaw || (bid.publicationDate ? DateUtils.formatDate(bid.publicationDate) : 'Unavailable');
+      const startText = bid.listingStartDateRaw || 'Unknown start';
+      const endText = bid.listingEndDateRaw || 'Unknown end';
+      const pageText = bid.sourcePageNumber || bid.pageNumber ? ('Page ' + (bid.sourcePageNumber || bid.pageNumber)) : 'Page unknown';
+      metaLine.textContent = 'Published: ' + publishedText + ' | Start: ' + startText + ' | End: ' + endText + ' | ' + pageText;
+
+      item.appendChild(title);
+      item.appendChild(metaLine);
+
+      if (bid.department) {
+        const dept = document.createElement('div');
+        dept.className = 'scan-result-desc';
+        dept.textContent = bid.department;
+        item.appendChild(dept);
+      }
+
+      if (bid.items) {
+        const desc = document.createElement('div');
+        desc.className = 'scan-result-desc';
+        desc.textContent = bid.items;
+        item.appendChild(desc);
+      }
+
+      if (unavailable) {
+        const status = document.createElement('div');
+        status.className = 'scan-result-status';
+        status.textContent = bid.extractionError || 'PDF Dated field could not be read.';
+        item.appendChild(status);
+      }
+
+      return item;
     },
 
     setActiveButton: function(action) {
@@ -845,120 +1264,188 @@
     running: false,
     abort: false,
     results: [],
+    collectedBids: [],
     seen: new Set(),
     lastMode: null,
+    activeControllers: new Set(),
 
     scan: async function(mode) {
       if (this.running) return;
       this.running = true;
       this.abort = false;
+      this.abortActiveRequests();
       this.results = [];
+      this.collectedBids = [];
       this.seen = new Set();
       this.lastMode = mode;
 
       UIManager.setScanRunning(true);
       UIManager.clearScanResults();
-      UIManager.updateScanStatus('Preparing scan...', 'info');
+      UIManager.updateScanStatus('Collecting tenders from result pages...', 'info');
 
-      const pageInfo = PaginationUtils.getPageInfo();
+      let pageInfo = PaginationUtils.getPageInfo();
       if (!pageInfo.totalPages || pageInfo.totalPages < 1) {
-        UIManager.updateScanStatus('Could not detect total pages', 'warning');
-        this.running = false;
-        UIManager.setScanRunning(false);
-        return;
+        pageInfo = {
+          totalPages: 1,
+          currentPage: 1,
+          pageSize: 0,
+          totalRecords: 0,
+          fallbackCurrentPageOnly: true
+        };
       }
 
       const pageMode = PaginationUtils.getPageMode();
       let errorCount = 0;
 
-      if (pageMode.mode === 'hash') {
-        errorCount = await this.scanByHash(pageInfo, mode);
+      if (pageInfo.totalPages === 1 || pageInfo.fallbackCurrentPageOnly) {
+        this.collectedBids = DOMParser.parseAllBids({ pageNumber: pageInfo.currentPage || 1 });
+      } else if (pageMode.mode === 'hash') {
+        errorCount = await this.collectByHash(pageInfo);
       } else if (pageMode.mode === 'query' && pageMode.buildUrl) {
-        errorCount = await this.scanByFetch(pageInfo, mode, pageMode.buildUrl);
+        errorCount = await this.collectByFetch(pageInfo, pageMode.buildUrl);
       } else {
-        UIManager.updateScanStatus('Unable to detect pagination pattern', 'warning');
-        this.running = false;
-        UIManager.setScanRunning(false);
+        UIManager.updateScanStatus('Unable to detect pagination. Parsed current page only.', 'warning');
+        this.collectedBids = DOMParser.parseAllBids({ pageNumber: pageInfo.currentPage || 1 });
+      }
+
+      this.collectedBids = dedupeBids(this.collectedBids);
+
+      if (this.abort) {
+        this.results = this.filterResults(this.collectedBids, mode);
+        this.results = FilterEngine.sortByPublicationDate(this.results);
+        this.finishScan(true, pageInfo, errorCount);
         return;
       }
 
-      this.finishScan(false, pageInfo, errorCount);
+      if (this.collectedBids.length === 0) {
+        this.finishScan(false, pageInfo, errorCount);
+        return;
+      }
+
+      UIManager.updateScanStatus('Collected ' + this.collectedBids.length + ' tenders. Parsing PDFs...', 'info');
+
+      await BidsEnricher.enrichBids(this.collectedBids, {
+        concurrency: CONFIG.pdfConcurrency,
+        controllerRegistry: this.activeControllers,
+        fetchTimeoutMs: CONFIG.pdfFetchTimeoutMs,
+        parseTimeoutMs: CONFIG.pdfParseTimeoutMs,
+        shouldAbort: () => this.abort,
+        onProgress: (done, total) => {
+          const unavailable = FilterEngine.getDateUnavailable(this.collectedBids).length;
+          const unavailableText = unavailable > 0 ? (' - ' + unavailable + ' unavailable') : '';
+          UIManager.updateScanStatus('Parsed ' + done + ' / ' + total + ' tenders' + unavailableText, 'info');
+        }
+      });
+
+      this.results = this.filterResults(this.collectedBids, mode);
+      this.results = FilterEngine.sortByPublicationDate(this.results);
+      this.finishScan(this.abort, pageInfo, errorCount);
     },
 
     stop: function() {
       if (!this.running) return;
       this.abort = true;
-      UIManager.updateScanStatus('Stopping scan...', 'warning');
+      this.abortActiveRequests();
+      UIManager.updateScanStatus('Stopping scan. Active requests aborted...', 'warning');
+    },
+
+    abortActiveRequests: function() {
+      this.activeControllers.forEach((controller) => {
+        try {
+          controller.abort();
+        } catch (error) {
+          // Ignore already-finished requests.
+        }
+      });
+      this.activeControllers.clear();
     },
 
     finishScan: function(stoppedEarly, pageInfo, errorCount) {
       this.running = false;
       UIManager.setScanRunning(false);
 
-      this.sortResults();
-      UIManager.renderScanResults(this.results, { maxShown: 50 });
+      UIManager.renderScanResults(this.results, {
+        maxShown: CONFIG.maxShownResults,
+        unavailableLimit: CONFIG.maxUnavailableShown
+      });
+
+      const unavailableCount = FilterEngine.getDateUnavailable(this.results).length;
+      const unavailableText = unavailableCount > 0 ? (' Date unavailable: ' + unavailableCount + '.') : '';
 
       if (stoppedEarly || this.abort) {
-        UIManager.updateScanStatus('Scan stopped. Found ' + this.results.length + ' matches.', 'warning');
+        UIManager.updateScanStatus('Scan stopped. Showing parsed results.' + unavailableText, 'warning');
         return;
       }
 
-      const errorText = errorCount > 0 ? (' Completed with ' + errorCount + ' errors.') : '';
-      UIManager.updateScanStatus('Scan complete. Found ' + this.results.length + ' matches.' + errorText, 'info');
+      const fallbackText = pageInfo && pageInfo.fallbackCurrentPageOnly ? ' Current page only.' : '';
+      const errorText = errorCount > 0 ? (' Completed with ' + errorCount + ' page errors.') : '';
+      UIManager.updateScanStatus('Scan complete. Found ' + this.results.length + ' tenders.' + unavailableText + fallbackText + errorText, 'info');
     },
 
-    sortResults: function() {
-      this.results.sort((a, b) => {
-        const timeA = a.startDate ? a.startDate.getTime() : 0;
-        const timeB = b.startDate ? b.startDate.getTime() : 0;
-        return timeB - timeA;
-      });
-    },
-
-    scanByFetch: async function(pageInfo, mode, buildUrl) {
+    collectByFetch: async function(pageInfo, buildUrl) {
       const total = pageInfo.totalPages;
       let errorCount = 0;
+      const collected = [];
 
       for (let page = 1; page <= total; page++) {
         if (this.abort) break;
-        UIManager.updateScanStatus('Scanning page ' + page + ' of ' + total, 'info');
+        UIManager.updateScanStatus('Collecting page ' + page + ' of ' + total, 'info');
 
         const url = buildUrl(page);
+        const tracked = createTrackedAbortController(this.activeControllers);
         try {
-          const response = await fetch(url, { credentials: 'include' });
+          const response = await withTimeout(fetch(url, {
+            credentials: 'include',
+            signal: tracked.controller.signal
+          }), CONFIG.pageFetchTimeoutMs, 'Page fetch timed out', () => tracked.controller.abort());
           if (!response.ok) {
             errorCount += 1;
             continue;
           }
 
-          const html = await response.text();
+          const html = await withTimeout(
+            response.text(),
+            CONFIG.pageFetchTimeoutMs,
+            'Page fetch timed out',
+            () => tracked.controller.abort()
+          );
           const doc = new window.DOMParser().parseFromString(html, 'text/html');
-          const bids = DOMParser.parseAllBidsFromRoot(doc, { baseUrl: url, pageNumber: page });
-          this.processBids(bids, mode, page, url);
+          const bids = DOMParser.parseAllBidsFromRoot(doc, {
+            baseUrl: url,
+            pageNumber: page,
+            scanOrderOffset: collected.length
+          });
+          collected.push.apply(collected, bids);
         } catch (error) {
-          errorCount += 1;
+          if (!this.abort) {
+            errorCount += 1;
+          }
+        } finally {
+          tracked.release();
         }
 
         await sleep(150);
       }
 
+      this.collectedBids = collected;
       return errorCount;
     },
 
-    scanByHash: async function(pageInfo, mode) {
+    collectByHash: async function(pageInfo) {
       const total = pageInfo.totalPages;
       const originalHash = window.location.hash;
       let errorCount = 0;
       let previousSignature = getPageSignature();
+      const collected = [];
 
       for (let page = 1; page <= total; page++) {
         if (this.abort) break;
-        UIManager.updateScanStatus('Scanning page ' + page + ' of ' + total, 'info');
+        UIManager.updateScanStatus('Collecting page ' + page + ' of ' + total, 'info');
 
         const currentPage = PaginationUtils.getCurrentPageNumber();
         if (currentPage !== page) {
           PaginationUtils.setHashPage(page);
-          const changed = await waitForPageUpdate(page, previousSignature, 15000, () => this.abort);
+          const changed = await waitForPageUpdate(page, previousSignature, CONFIG.pageFetchTimeoutMs, () => this.abort);
           if (!changed) {
             errorCount += 1;
           }
@@ -966,8 +1453,12 @@
 
         previousSignature = getPageSignature();
         const pageUrl = PaginationUtils.buildHashUrl(page);
-        const bids = DOMParser.parseAllBids({ baseUrl: pageUrl, pageNumber: page });
-        this.processBids(bids, mode, page, pageUrl);
+        const bids = DOMParser.parseAllBids({
+          baseUrl: pageUrl,
+          pageNumber: page,
+          scanOrderOffset: collected.length
+        });
+        collected.push.apply(collected, bids);
 
         await sleep(150);
       }
@@ -976,33 +1467,23 @@
         window.location.hash = originalHash.replace(/^#/, '');
       }
 
+      this.collectedBids = collected;
       return errorCount;
     },
 
-    processBids: function(bids, mode, pageNumber, sourceUrl) {
-      const filtered = bids.filter((bid) => {
-        if (!bid.startDate) return false;
-        if (mode === 'today') return DateUtils.isToday(bid.startDate);
-        if (mode === 'week') return DateUtils.isWithinDays(bid.startDate, 7);
-        if (mode === 'newest') return true;
-        return false;
-      });
+    filterResults: function(bids, mode) {
+      const renderable = FilterEngine.getRenderableResults(bids);
+      const unavailable = FilterEngine.getDateUnavailable(renderable);
 
-      filtered.forEach((bid) => {
-        const key = buildBidKey(bid);
-        if (this.seen.has(key)) return;
-        this.seen.add(key);
+      if (mode === 'today') {
+        return FilterEngine.filterPublishedToday(renderable).concat(unavailable);
+      }
 
-        this.results.push({
-          bidNo: bid.bidNo,
-          items: bid.items,
-          startDate: bid.startDate,
-          startDateRaw: bid.startDateRaw,
-          bidLink: bid.bidLink,
-          sourceUrl: sourceUrl || bid.sourceUrl,
-          pageNumber: bid.pageNumber || pageNumber
-        });
-      });
+      if (mode === 'week') {
+        return FilterEngine.filterPublishedThisWeek(renderable).concat(unavailable);
+      }
+
+      return renderable;
     }
   };
 
@@ -1016,9 +1497,11 @@
       autoHighlight: true,
       hideOldBids: false
     },
+    currentOperationId: 0,
+    currentPageBusy: false,
+    currentPageControllers: new Set(),
 
     init: function() {
-      // Wait for page to be ready
       if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => this.setup());
       } else {
@@ -1073,16 +1556,13 @@
 
     applySettings: function() {
       if (!this.activeFilter && this.settings.autoHighlight) {
-        this.showTodaysBids({
-          hideOthers: false,
+        this.showPublishedToday({
           setActive: false,
           resetView: true,
-          statusMessage: 'Auto-highlighted today\'s bids'
+          statusMessage: 'Auto-highlighted tenders published today'
         });
-      }
-
-      if (this.settings.hideOldBids) {
-        this.hideBidsOlderThan(7);
+      } else if (this.settings.hideOldBids) {
+        this.hideBidsOlderThanPublished(7);
       }
     },
 
@@ -1090,8 +1570,9 @@
       let refreshTimer = null;
 
       const observer = new MutationObserver((mutations) => {
-        const hasNewNodes = mutations.some((mutation) => mutation.addedNodes && mutation.addedNodes.length > 0);
+        const hasNewNodes = mutations.some((mutation) => this.isExternalMutation(mutation));
         if (!hasNewNodes) return;
+        if (this.currentPageBusy || ScanManager.running) return;
 
         if (refreshTimer) return;
         refreshTimer = window.setTimeout(() => {
@@ -1107,130 +1588,202 @@
       });
     },
 
+    isExternalMutation: function(mutation) {
+      const panel = document.getElementById(CONFIG.panelId);
+      if (!mutation || !mutation.addedNodes || mutation.addedNodes.length === 0) return false;
+      if (!panel) return true;
+      if (panel && (mutation.target === panel || panel.contains(mutation.target))) return false;
+
+      return Array.from(mutation.addedNodes).some((node) => {
+        if (node === panel) return false;
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          return !panel.contains(node);
+        }
+        const parent = node.parentElement || mutation.target;
+        return !panel.contains(parent);
+      });
+    },
+
     reapplyActiveFilter: function(reason) {
-      if (this.activeFilter === 'today') {
-        this.showTodaysBids({ setActive: false, resetView: true });
-      } else if (this.activeFilter === 'week') {
-        this.showThisWeekBids({ setActive: false, resetView: true });
-      } else if (this.activeFilter === 'sort') {
-        this.sortByNewest({ setActive: false });
+      if (this.activeFilter === 'published-today') {
+        this.showPublishedToday({ setActive: false, resetView: true });
+      } else if (this.activeFilter === 'published-week') {
+        this.showPublishedThisWeek({ setActive: false, resetView: true });
+      } else if (this.activeFilter === 'published-sort') {
+        this.sortByPublicationDate({ setActive: false });
       } else {
         if (reason === 'settings-change' && !this.settings.hideOldBids) {
           UIManager.showHiddenBids();
         }
         this.applySettings();
       }
-
-      if (this.settings.hideOldBids) {
-        this.hideBidsOlderThan(7);
-      }
     },
 
-    showTodaysBids: function(options) {
+    getCurrentPageBidsWithPublicationDates: async function(statusPrefix, operationId) {
+      const allBids = DOMParser.parseAllBids();
+      if (allBids.length === 0) {
+        UIManager.updateStatus('No bid cards found on this page', 'warning');
+        return [];
+      }
+
+      await BidsEnricher.enrichBids(allBids, {
+        concurrency: CONFIG.pdfConcurrency,
+        controllerRegistry: this.currentPageControllers,
+        fetchTimeoutMs: CONFIG.pdfFetchTimeoutMs,
+        parseTimeoutMs: CONFIG.pdfParseTimeoutMs,
+        shouldAbort: () => operationId !== this.currentOperationId,
+        onProgress: (done, total) => {
+          if (operationId !== this.currentOperationId) return;
+          const unavailable = FilterEngine.getDateUnavailable(allBids).length;
+          const unavailableText = unavailable > 0 ? (' - ' + unavailable + ' unavailable') : '';
+          UIManager.updateStatus((statusPrefix || 'Parsing PDFs') + ': ' + done + ' / ' + total + unavailableText, 'info');
+        }
+      });
+
+      return allBids;
+    },
+
+    showPublishedToday: async function(options) {
       const opts = Object.assign({
-        hideOthers: false,
         setActive: true,
         resetView: true,
         statusMessage: null
       }, options || {});
 
-      const allBids = DOMParser.parseAllBids();
-      const todaysBids = FilterEngine.filterToday(allBids);
+      this.abortCurrentPageRequests();
+      const operationId = ++this.currentOperationId;
+      this.currentPageBusy = true;
+      UIManager.setCurrentPageBusy(true);
 
-      if (opts.resetView) {
-        UIManager.showAllBids();
-      }
+      try {
+        if (opts.resetView) UIManager.showAllBids();
+        const allBids = await this.getCurrentPageBidsWithPublicationDates('Parsing publication dates', operationId);
+        if (operationId !== this.currentOperationId) return;
 
-      if (todaysBids.length > 0) {
-        UIManager.highlightBids(todaysBids, CONFIG.highlightClass);
-        if (opts.hideOthers) {
-          const otherBids = allBids.filter((bid) => todaysBids.indexOf(bid) === -1);
-          UIManager.hideBids(otherBids);
+        const todaysBids = FilterEngine.filterPublishedToday(allBids);
+        if (todaysBids.length > 0) {
+          UIManager.highlightBids(todaysBids, CONFIG.highlightClass);
         }
-      }
 
-      const message = opts.statusMessage || ('Found ' + todaysBids.length + ' bids from today');
-      UIManager.updateStatus(message, todaysBids.length > 0 ? 'info' : 'warning');
+        const message = opts.statusMessage || ('Found ' + todaysBids.length + ' tenders published today');
+        UIManager.updateStatus(message, todaysBids.length > 0 ? 'info' : 'warning');
 
-      if (opts.setActive) {
-        this.activeFilter = 'today';
-        UIManager.setActiveButton('today');
-      }
+        if (opts.setActive) {
+          this.activeFilter = 'published-today';
+          UIManager.setActiveButton('published-today');
+        }
 
-      if (this.settings.hideOldBids) {
-        this.hideBidsOlderThan(7);
+        if (this.settings.hideOldBids) {
+          this.hideBidsOlderThanPublished(7, allBids);
+        }
+      } finally {
+        if (operationId === this.currentOperationId) {
+          this.currentPageBusy = false;
+          this.abortCurrentPageRequests();
+          UIManager.setCurrentPageBusy(false);
+        }
       }
     },
 
-    showThisWeekBids: function(options) {
+    showPublishedThisWeek: async function(options) {
       const opts = Object.assign({
         setActive: true,
         resetView: true
       }, options || {});
 
-      const allBids = DOMParser.parseAllBids();
-      const weekBids = FilterEngine.filterThisWeek(allBids);
+      this.abortCurrentPageRequests();
+      const operationId = ++this.currentOperationId;
+      this.currentPageBusy = true;
+      UIManager.setCurrentPageBusy(true);
 
-      if (opts.resetView) {
-        UIManager.showAllBids();
-      }
+      try {
+        if (opts.resetView) UIManager.showAllBids();
+        const allBids = await this.getCurrentPageBidsWithPublicationDates('Parsing publication dates', operationId);
+        if (operationId !== this.currentOperationId) return;
 
-      if (weekBids.length > 0) {
-        UIManager.highlightBids(weekBids, CONFIG.weekHighlightClass);
-      }
+        const weekBids = FilterEngine.filterPublishedThisWeek(allBids);
+        if (weekBids.length > 0) {
+          UIManager.highlightBids(weekBids, CONFIG.weekHighlightClass);
+        }
 
-      UIManager.updateStatus('Found ' + weekBids.length + ' bids from this week', weekBids.length > 0 ? 'info' : 'warning');
+        UIManager.updateStatus('Found ' + weekBids.length + ' tenders published this week', weekBids.length > 0 ? 'info' : 'warning');
 
-      if (opts.setActive) {
-        this.activeFilter = 'week';
-        UIManager.setActiveButton('week');
-      }
+        if (opts.setActive) {
+          this.activeFilter = 'published-week';
+          UIManager.setActiveButton('published-week');
+        }
 
-      if (this.settings.hideOldBids) {
-        this.hideBidsOlderThan(7);
+        if (this.settings.hideOldBids) {
+          this.hideBidsOlderThanPublished(7, allBids);
+        }
+      } finally {
+        if (operationId === this.currentOperationId) {
+          this.currentPageBusy = false;
+          this.abortCurrentPageRequests();
+          UIManager.setCurrentPageBusy(false);
+        }
       }
     },
 
-    sortByNewest: function(options) {
+    sortByPublicationDate: async function(options) {
       const opts = Object.assign({
         setActive: true
       }, options || {});
 
-      const allBids = DOMParser.parseAllBids();
-      const sorted = FilterEngine.sortByNewest(allBids);
+      this.abortCurrentPageRequests();
+      const operationId = ++this.currentOperationId;
+      this.currentPageBusy = true;
+      UIManager.setCurrentPageBusy(true);
 
-      const container = DOMParser.findBestContainer(sorted);
-      if (!container) {
-        UIManager.updateStatus('Unable to locate bid list to sort', 'warning');
-        return;
-      }
+      try {
+        UIManager.showAllBids();
+        const allBids = await this.getCurrentPageBidsWithPublicationDates('Parsing publication dates', operationId);
+        if (operationId !== this.currentOperationId) return;
 
-      const hasDates = sorted.some((bid) => bid.startDate instanceof Date && !isNaN(bid.startDate));
-      if (!hasDates) {
-        UIManager.updateStatus('No start dates found to sort', 'warning');
-        return;
-      }
-
-      sorted.forEach((bid) => {
-        const target = bid.sortElement || bid.element;
-        if (target && target.parentElement === container) {
-          container.appendChild(target);
+        const sorted = FilterEngine.sortByPublicationDate(allBids);
+        const container = DOMParser.findBestContainer(sorted);
+        if (!container) {
+          UIManager.updateStatus('Unable to locate bid list to sort', 'warning');
+          return;
         }
-      });
 
-      UIManager.updateStatus('Sorted by newest first', 'info');
+        const hasPublicationDates = sorted.some((bid) => DateUtils.isValidDate(bid.publicationDate));
+        if (!hasPublicationDates) {
+          UIManager.updateStatus('No PDF published dates found to sort', 'warning');
+          return;
+        }
 
-      if (opts.setActive) {
-        this.activeFilter = 'sort';
-        UIManager.setActiveButton('sort');
-      }
+        sorted.forEach((bid) => {
+          const target = bid.sortElement || bid.element;
+          if (target && target.parentElement === container) {
+            container.appendChild(target);
+          }
+        });
 
-      if (this.settings.hideOldBids) {
-        this.hideBidsOlderThan(7);
+        UIManager.updateStatus('Sorted by PDF published date', 'info');
+
+        if (opts.setActive) {
+          this.activeFilter = 'published-sort';
+          UIManager.setActiveButton('published-sort');
+        }
+
+        if (this.settings.hideOldBids) {
+          this.hideBidsOlderThanPublished(7, allBids);
+        }
+      } finally {
+        if (operationId === this.currentOperationId) {
+          this.currentPageBusy = false;
+          this.abortCurrentPageRequests();
+          UIManager.setCurrentPageBusy(false);
+        }
       }
     },
 
     reset: function() {
+      this.currentOperationId += 1;
+      this.currentPageBusy = false;
+      this.abortCurrentPageRequests();
+      UIManager.setCurrentPageBusy(false);
       UIManager.showAllBids();
       this.restoreOriginalOrder();
       this.activeFilter = null;
@@ -1238,7 +1791,7 @@
       UIManager.updateStatus('Filters reset', 'info');
 
       if (this.settings.hideOldBids) {
-        this.hideBidsOlderThan(7);
+        this.hideBidsOlderThanPublished(7);
       }
     },
 
@@ -1248,6 +1801,17 @@
 
     stopScan: function() {
       ScanManager.stop();
+    },
+
+    abortCurrentPageRequests: function() {
+      this.currentPageControllers.forEach((controller) => {
+        try {
+          controller.abort();
+        } catch (error) {
+          // Ignore already-finished requests.
+        }
+      });
+      this.currentPageControllers.clear();
     },
 
     restoreOriginalOrder: function() {
@@ -1271,11 +1835,12 @@
       });
     },
 
-    hideBidsOlderThan: function(days) {
-      const allBids = DOMParser.parseAllBids();
+    hideBidsOlderThanPublished: async function(days, existingBids) {
+      const operationId = this.currentOperationId;
+      const allBids = existingBids || await this.getCurrentPageBidsWithPublicationDates('Parsing publication dates', operationId);
       const toHide = allBids.filter((bid) => {
-        if (!bid.startDate) return false;
-        return !DateUtils.isWithinDays(bid.startDate, days);
+        if (!DateUtils.isValidDate(bid.publicationDate)) return false;
+        return !DateUtils.isWithinDays(bid.publicationDate, days);
       });
 
       if (toHide.length > 0) {
@@ -1289,7 +1854,7 @@
   // ============================================
 
   function normalizeWhitespace(text) {
-    return text.replace(/\s+/g, ' ').trim();
+    return String(text || '').replace(/\s+/g, ' ').trim();
   }
 
   function uniqueElements(elements) {
@@ -1326,8 +1891,17 @@
     const text = normalizeWhitespace(element.textContent);
     if (!/start\s*date/i.test(text)) return false;
     if (!/bid\s*no/i.test(text)) return false;
-    if (countRegexMatches(text, /bid\s*no/ig) > 1) return false;
+    if (countRegexMatches(text, /bid\s*no/ig) > 2) return false;
     return true;
+  }
+
+  function extractBidNo(cardElement) {
+    if (!cardElement) return '';
+    const text = normalizeWhitespace(cardElement.textContent || '');
+    const labeled = text.match(/bid\s*no\.?\s*:?\s*(GEM\/\d{4}\/B\/\d+)/i);
+    if (labeled && labeled[1]) return labeled[1];
+    const fallback = text.match(/\bGEM\/\d{4}\/B\/\d+\b/i);
+    return fallback ? fallback[0] : '';
   }
 
   function extractLabelValue(cardElement, labelRegexes) {
@@ -1340,7 +1914,7 @@
         const labelRegex = labelRegexes[i];
         const pattern = new RegExp(
           labelRegex.source +
-            '\\s*:?\\s*(\\d{2}-\\d{2}-\\d{4}(?:\\s+\\d{1,2}:\\d{2}\\s*(?:AM|PM))?)',
+            '\\s*:?\\s*(\\d{1,2}[-/]\\d{1,2}[-/]\\d{4}(?:\\s+\\d{1,2}:\\d{2}(?::\\d{2})?\\s*(?:AM|PM)?)?)',
           'i'
         );
         const match = cardText.match(pattern);
@@ -1418,6 +1992,29 @@
     }
 
     return '';
+  }
+
+  function trimExtractedValue(value) {
+    const text = normalizeWhitespace(value);
+    if (!text) return '';
+    const markers = [
+      /\s+Quantity\b/i,
+      /\s+Department\s+Name\b/i,
+      /\s+Start\s+Date\b/i,
+      /\s+End\s+Date\b/i,
+      /\s+Bid\s+No\b/i,
+      /\s+RA\s+NO\b/i
+    ];
+
+    let end = text.length;
+    markers.forEach((marker) => {
+      const match = text.match(marker);
+      if (match && typeof match.index === 'number') {
+        end = Math.min(end, match.index);
+      }
+    });
+
+    return text.slice(0, end).trim();
   }
 
   function collectTextNodes(root) {
@@ -1531,22 +2128,23 @@
     if (anchors.length === 0) return '';
 
     if (bidNo) {
-      const match = anchors.find((anchor) => {
+      const bidAnchor = anchors.find((anchor) => {
         const text = normalizeWhitespace(anchor.textContent || '');
-        return text.indexOf(bidNo) !== -1;
+        const href = anchor.getAttribute('href') || '';
+        return text.indexOf(bidNo) !== -1 || href.indexOf(encodeURIComponent(bidNo)) !== -1 || href.indexOf(bidNo) !== -1;
       });
-      if (match) {
-        return resolveUrl(match.getAttribute('href'), baseUrl);
+      if (bidAnchor) {
+        return resolveUrl(bidAnchor.getAttribute('href'), baseUrl);
       }
     }
 
-    const fallback = anchors.find((anchor) => {
+    const documentAnchor = anchors.find((anchor) => {
       const text = normalizeWhitespace(anchor.textContent || '');
       const href = anchor.getAttribute('href') || '';
-      return /gem\//i.test(text) || /bid/i.test(href);
+      return /bid/i.test(text) || /bidding|bid|document|show/i.test(href);
     });
 
-    const target = fallback || anchors[0];
+    const target = documentAnchor || anchors[0];
     return resolveUrl(target.getAttribute('href'), baseUrl);
   }
 
@@ -1572,14 +2170,102 @@
     return '';
   }
 
+  function readElementPublicationDate(element) {
+    if (!element) return null;
+    const attr = element.getAttribute(CONFIG.publicationDateAttr);
+    if (!attr) return null;
+    const ts = parseInt(attr, 10);
+    if (isNaN(ts)) return null;
+    const date = new Date(ts);
+    return DateUtils.isValidDate(date) ? date : null;
+  }
+
+  function applyPublicationDate(bid, date, raw, status, pdfBidNo) {
+    bid.publicationDate = date;
+    bid.publicationDateRaw = raw || DateUtils.formatDate(date);
+    bid.extractionStatus = status || 'ok';
+    bid.extractionError = '';
+    bid.pdfBidNo = pdfBidNo || '';
+
+    const element = bid.element;
+    if (element && DateUtils.isValidDate(date)) {
+      element.setAttribute(CONFIG.publicationDateAttr, String(date.getTime()));
+      element.setAttribute(CONFIG.publicationDateRawAttr, bid.publicationDateRaw);
+    }
+  }
+
+  function extractPublicationInfoFromText(text) {
+    const normalized = normalizeWhitespace(text);
+    if (!normalized) return null;
+
+    const bidMatch = normalized.match(/\bGEM\/\d{4}\/B\/\d+\b/i);
+    const datePatterns = [
+      /Dated\s*:?\s*(\d{1,2}[-/]\d{1,2}[-/]\d{4})/i,
+      /Dated\s+(\d{1,2}[-/]\d{1,2}[-/]\d{4})/i
+    ];
+
+    let rawDate = '';
+    for (let i = 0; i < datePatterns.length; i++) {
+      const match = normalized.match(datePatterns[i]);
+      if (match && match[1]) {
+        rawDate = match[1];
+        break;
+      }
+    }
+
+    const publicationDate = DateUtils.parseGemDate(rawDate);
+    if (!DateUtils.isValidDate(publicationDate)) return null;
+
+    return {
+      publicationDate: publicationDate,
+      publicationDateRaw: rawDate,
+      pdfBidNo: bidMatch ? bidMatch[0] : ''
+    };
+  }
+
+  function extractTextFallback(arrayBuffer) {
+    try {
+      const bytes = new Uint8Array(arrayBuffer);
+      const maxBytes = Math.min(bytes.length, 250000);
+      const slice = bytes.slice(0, maxBytes);
+      return new TextDecoder('iso-8859-1').decode(slice)
+        .replace(/\0/g, ' ')
+        .replace(/[()<>[\]{}]/g, ' ');
+    } catch (error) {
+      return '';
+    }
+  }
+
+  function dedupeBids(bids) {
+    const seen = new Set();
+    const result = [];
+    (bids || []).forEach((bid, index) => {
+      const key = buildBidKey(bid);
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      bid.scanOrder = typeof bid.scanOrder === 'number' ? bid.scanOrder : index;
+      result.push(bid);
+    });
+    return result;
+  }
+
   function buildBidKey(bid) {
     if (!bid) return '';
     if (bid.bidNo) return bid.bidNo;
+    if (bid.bidDocumentUrl) return bid.bidDocumentUrl;
     const parts = [];
-    if (bid.startDate) parts.push(String(bid.startDate.getTime()));
-    if (bid.startDateRaw) parts.push(bid.startDateRaw);
+    if (bid.listingStartDate) parts.push(String(bid.listingStartDate.getTime()));
+    if (bid.listingStartDateRaw) parts.push(bid.listingStartDateRaw);
     if (bid.items) parts.push(bid.items.slice(0, 80));
     return parts.join('|');
+  }
+
+  function getStableOrder(bid) {
+    if (!bid) return 0;
+    if (typeof bid.scanOrder === 'number') return bid.scanOrder;
+    const element = bid.sortElement || bid.element;
+    if (!element) return 0;
+    return parseInt(element.getAttribute(CONFIG.originalOrderAttr) || '0', 10);
   }
 
   function getPageSignature() {
@@ -1595,7 +2281,7 @@
   async function waitForPageUpdate(targetPage, previousSignature, timeoutMs, shouldAbort) {
     const start = Date.now();
     const timeout = timeoutMs || 10000;
-    let lastSignature = previousSignature || '';
+    const lastSignature = previousSignature || '';
 
     while (Date.now() - start < timeout) {
       if (shouldAbort && shouldAbort()) return false;
@@ -1611,11 +2297,110 @@
     return false;
   }
 
+  function withTimeout(promise, ms, timeoutMessage, onTimeout) {
+    if (!ms || ms <= 0) {
+      return Promise.resolve(promise);
+    }
+
+    let timeoutId = null;
+    const timeoutPromise = new Promise((resolve, reject) => {
+      timeoutId = window.setTimeout(() => {
+        if (typeof onTimeout === 'function') {
+          try {
+            onTimeout();
+          } catch (error) {
+            // Timeout cleanup must not hide the timeout failure.
+          }
+        }
+        const error = new Error(timeoutMessage || 'Operation timed out');
+        error.isTimeout = true;
+        reject(error);
+      }, ms);
+    });
+
+    return Promise.race([Promise.resolve(promise), timeoutPromise]).finally(() => {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    });
+  }
+
+  function createTrackedAbortController(registry) {
+    const controller = new AbortController();
+    if (registry && typeof registry.add === 'function') {
+      registry.add(controller);
+    }
+
+    return {
+      controller: controller,
+      release: function() {
+        if (registry && typeof registry.delete === 'function') {
+          registry.delete(controller);
+        }
+      }
+    };
+  }
+
+  async function destroyPdfResource(resource) {
+    if (!resource || typeof resource.destroy !== 'function') return;
+    try {
+      await withTimeout(
+        Promise.resolve(resource.destroy()),
+        CONFIG.pdfCleanupTimeoutMs,
+        'PDF cleanup timed out'
+      );
+    } catch (error) {
+      // PDF.js can reject destroy calls for already-terminated workers.
+    }
+  }
+
+  function markBidUnavailable(bid, error) {
+    if (!bid) return;
+    bid.extractionStatus = 'unavailable';
+    bid.extractionError = normalizeExtractionError(error);
+  }
+
+  function normalizeExtractionError(error) {
+    if (!error) return 'Could not parse PDF date';
+    if (error.name === 'AbortError') return 'PDF request aborted';
+    const message = error.message || String(error);
+    if (/aborted/i.test(message)) return 'PDF request aborted';
+    if (/PDF fetch timed out/i.test(message)) return 'PDF fetch timed out';
+    if (/PDF parse timed out/i.test(message)) return 'PDF parse timed out';
+    if (/PDF processing timed out/i.test(message)) return 'PDF processing timed out';
+    if (/Page fetch timed out/i.test(message)) return 'Page fetch timed out';
+    return message || 'Could not parse PDF date';
+  }
+
+  function chromeStorageGet(area, keys) {
+    return new Promise((resolve, reject) => {
+      chrome.storage[area].get(keys, (result) => {
+        const error = chrome.runtime && chrome.runtime.lastError;
+        if (error) {
+          reject(new Error(error.message));
+          return;
+        }
+        resolve(result || {});
+      });
+    });
+  }
+
+  function chromeStorageSet(area, value) {
+    return new Promise((resolve, reject) => {
+      chrome.storage[area].set(value, () => {
+        const error = chrome.runtime && chrome.runtime.lastError;
+        if (error) {
+          reject(new Error(error.message));
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  // Start the extension
   Controller.init();
-
 })();

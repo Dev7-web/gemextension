@@ -20,7 +20,7 @@
   position: fixed;
   top: 100px;
   right: 20px;
-  width: 280px;
+  width: 340px;
   background: var(--gem-panel-bg);
   border: 1px solid var(--gem-panel-border);
   border-radius: 10px;
@@ -151,7 +151,7 @@
 /* Scan Results */
 #gem-bid-filter-panel .scan-results {
   margin-top: 10px;
-  max-height: 220px;
+  max-height: 320px;
   overflow-y: auto;
   border: 1px solid #e2e8f0;
   border-radius: 6px;
@@ -176,6 +176,11 @@
   padding: 6px 8px;
   margin-bottom: 8px;
   background: #f8fafc;
+}
+
+#gem-bid-filter-panel .scan-result-item.unavailable {
+  border-color: #fbd38d;
+  background: #fffaf0;
 }
 
 #gem-bid-filter-panel .scan-result-item:last-child {
@@ -205,6 +210,21 @@
   margin-top: 4px;
 }
 
+#gem-bid-filter-panel .scan-result-section {
+  font-size: 11px;
+  color: #975a16;
+  font-weight: 700;
+  margin: 10px 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+#gem-bid-filter-panel .scan-result-status {
+  font-size: 11px;
+  color: #975a16;
+  margin-top: 4px;
+}
+
 #gem-bid-filter-panel .scan-empty {
   font-size: 12px;
   color: #64748b;
@@ -230,7 +250,7 @@
    BID CARD HIGHLIGHTING
    ============================================ */
 
-/* Today's Bids - Green Highlight */
+/* Published Today - Green Highlight */
 .gem-bid-highlight-today {
   border-left: 4px solid #38a169 !important;
   background: linear-gradient(90deg, #f0fff4 0%, transparent 100%) !important;
@@ -238,7 +258,7 @@
 }
 
 .gem-bid-highlight-today::before {
-  content: 'NEW TODAY';
+  content: 'PUBLISHED TODAY';
   position: absolute;
   top: 5px;
   right: 10px;

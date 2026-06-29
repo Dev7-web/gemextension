@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "GeM Bid Filter - Sort by Newest",
+  "name": "GeM Tender Published Date Sorter",
   "version": "1.0.0",
-  "description": "Filter and sort GeM bids by Start Date to see newest opportunities first",
+  "description": "Scan GeM bid documents and sort tenders by the PDF Dated field",
   "permissions": [
     "activeTab",
     "storage"
@@ -20,6 +20,18 @@
       "js": ["content/content.js"],
       "css": ["content/content.css"],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "vendor/pdfjs/pdf.min.mjs",
+        "vendor/pdfjs/pdf.worker.min.mjs"
+      ],
+      "matches": [
+        "https://bidplus.gem.gov.in/*",
+        "https://gem.gov.in/*"
+      ]
     }
   ],
   "action": {
