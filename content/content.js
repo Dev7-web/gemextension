@@ -940,6 +940,10 @@
   // ============================================
 
   const UIManager = {
+    lastScanResults: null,
+    lastScanMeta: null,
+    scanResultsHidden: false,
+
     createPanel: function() {
       if (document.getElementById(CONFIG.panelId)) return;
 
@@ -1011,6 +1015,22 @@
           }
         });
       });
+
+      const scanResults = panel.querySelector('#' + CONFIG.scanResultsId);
+      if (scanResults) {
+        scanResults.addEventListener('click', (event) => {
+          const target = event.target instanceof Element ? event.target : event.target.parentElement;
+          const actionButton = target && target.closest('[data-scan-results-action]');
+          if (!actionButton || !scanResults.contains(actionButton)) return;
+
+          const action = actionButton.getAttribute('data-scan-results-action');
+          if (action === 'hide') {
+            this.hideScanResults();
+          } else if (action === 'show') {
+            this.showScanResults();
+          }
+        });
+      }
     },
 
     updateStatus: function(message, type) {
@@ -1062,52 +1082,125 @@
     clearScanResults: function() {
       const container = document.getElementById(CONFIG.scanResultsId);
       if (!container) return;
+      this.lastScanResults = null;
+      this.lastScanMeta = null;
+      this.scanResultsHidden = false;
       container.textContent = '';
-      container.classList.remove('active');
+      container.classList.remove('active', 'scan-results-hidden');
     },
 
     renderScanResults: function(results, meta) {
+      this.lastScanResults = Array.isArray(results) ? results.slice() : [];
+      this.lastScanMeta = meta ? Object.assign({}, meta) : {};
+      this.scanResultsHidden = false;
+      this.drawScanResults();
+    },
+
+    hideScanResults: function() {
+      if (!this.lastScanResults) return;
+      this.scanResultsHidden = true;
+      this.drawScanResults();
+    },
+
+    showScanResults: function() {
+      if (!this.lastScanResults) return;
+      this.scanResultsHidden = false;
+      this.drawScanResults();
+    },
+
+    drawScanResults: function() {
       const container = document.getElementById(CONFIG.scanResultsId);
       if (!container) return;
 
       container.textContent = '';
       container.classList.add('active');
+      container.classList.toggle('scan-results-hidden', this.scanResultsHidden);
 
-      const allResults = results || [];
+      const allResults = this.lastScanResults || [];
       const dated = allResults.filter((bid) => DateUtils.isValidDate(bid.publicationDate));
       const unavailable = allResults.filter((bid) => !DateUtils.isValidDate(bid.publicationDate));
-      const maxShown = meta && meta.maxShown ? meta.maxShown : CONFIG.maxShownResults;
-      const unavailableLimit = meta && meta.unavailableLimit ? meta.unavailableLimit : CONFIG.maxUnavailableShown;
-
-      const summary = document.createElement('div');
-      summary.className = 'scan-summary';
+      const meta = this.lastScanMeta || {};
+      const maxShown = meta.maxShown ? meta.maxShown : CONFIG.maxShownResults;
+      const unavailableLimit = meta.unavailableLimit ? meta.unavailableLimit : CONFIG.maxUnavailableShown;
       const datedText = dated.length > maxShown
         ? ('Showing newest ' + maxShown + ' of ' + dated.length + ' dated tenders')
         : ('Showing ' + dated.length + ' dated tenders');
       const unavailableText = unavailable.length ? (' | Date unavailable: ' + unavailable.length) : '';
+
+      if (this.scanResultsHidden) {
+        const hiddenButton = document.createElement('button');
+        hiddenButton.className = 'scan-results-hidden-bar';
+        hiddenButton.type = 'button';
+        hiddenButton.setAttribute('data-scan-results-action', 'show');
+        hiddenButton.setAttribute('aria-label', 'Show scan results');
+
+        const hiddenLabel = document.createElement('span');
+        hiddenLabel.className = 'scan-results-hidden-label';
+        hiddenLabel.textContent = 'Results hidden';
+
+        const hiddenCount = document.createElement('span');
+        hiddenCount.className = 'scan-results-hidden-count';
+        hiddenCount.textContent = 'Show ' + allResults.length + (allResults.length === 1 ? ' tender' : ' tenders');
+
+        hiddenButton.appendChild(hiddenLabel);
+        hiddenButton.appendChild(hiddenCount);
+        container.appendChild(hiddenButton);
+        return;
+      }
+
+      const header = document.createElement('div');
+      header.className = 'scan-results-header';
+
+      const headerText = document.createElement('div');
+      headerText.className = 'scan-results-heading';
+
+      const title = document.createElement('div');
+      title.className = 'scan-results-title';
+      title.textContent = 'Results';
+
+      const summary = document.createElement('div');
+      summary.className = 'scan-summary';
       summary.textContent = datedText + unavailableText;
-      container.appendChild(summary);
+
+      headerText.appendChild(title);
+      headerText.appendChild(summary);
+
+      const closeButton = document.createElement('button');
+      closeButton.className = 'scan-results-close';
+      closeButton.type = 'button';
+      closeButton.textContent = '\u00d7';
+      closeButton.setAttribute('data-scan-results-action', 'hide');
+      closeButton.setAttribute('aria-label', 'Close scan results');
+      closeButton.setAttribute('title', 'Close scan results');
+
+      header.appendChild(headerText);
+      header.appendChild(closeButton);
+      container.appendChild(header);
+
+      const list = document.createElement('div');
+      list.className = 'scan-results-list';
+      container.appendChild(list);
 
       if (allResults.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'scan-empty';
         empty.textContent = 'No matching tenders found.';
-        container.appendChild(empty);
+        list.appendChild(empty);
         return;
       }
 
       dated.slice(0, maxShown).forEach((bid) => {
-        container.appendChild(this.createResultItem(bid, false));
+        list.appendChild(this.createResultItem(bid, false));
       });
 
       if (unavailable.length > 0) {
         const section = document.createElement('div');
         section.className = 'scan-result-section';
         section.textContent = 'Date unavailable';
-        container.appendChild(section);
+        list.appendChild(section);
 
         unavailable.slice(0, unavailableLimit).forEach((bid) => {
-          container.appendChild(this.createResultItem(bid, true));
+          list.appendChild(this.createResultItem(bid, true));
         });
       }
     },
